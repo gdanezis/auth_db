@@ -10,20 +10,6 @@ fn main() {
         std::mem::size_of::<AuthTreeInternalNode>()
     );
 
-    let mut tree = TreeCache::new();
-    for num in 0..20 {
-        tree.insert(AuthTreeEntry::get_test_entry(num));
-    }
-
-    for num in 0..5 {
-        let res = tree.get(&[num; 4]);
-        assert!(res.unwrap().key[0] == num);
-    }
-
-    for num in 20..30 {
-        let res = tree.get(&[num; 4]);
-        assert!(res.is_none());
-    }
 }
 
 type AKey = [u64; 4];
@@ -67,7 +53,8 @@ impl TreeCache {
                 }
 
                 if current_node.keys[idx] == *key {
-                    return Some(self.data.get(&current_node.pointers[idx]).unwrap())
+                    let data = self.data.get(&current_node.pointers[idx]).unwrap();
+                    return Some(data);
                 }
                 else {
                     return None
@@ -132,13 +119,19 @@ impl TreeCache {
             }
 
             // This is not a leaf, it is a branch, ensure it is not empty
-            let child_node_pointer = current_node.pointers[index];
+            let mut child_node_pointer = current_node.pointers[index];
             let mut child_node = self.get_pointer(&child_node_pointer).unwrap();
             if child_node.is_full() {
                 drop(current_node);
                 drop(child_node);
-                let (key, _, r) = self.split_node(&child_node_pointer);
-                self.insert_at(&child_node_pointer, index, &key, r, &NULL_DIGEST);
+                {
+                    let (key, _, r) = self.split_node(&child_node_pointer);
+                    self.insert_at(&current_pointer, index, &key, r, &NULL_DIGEST);
+                }
+
+                current_node = self.get_pointer(&current_pointer).unwrap();
+                let index = current_node.get_index(&entry.key);
+                child_node_pointer = current_node.pointers[index];
                 child_node = self.get_pointer(&child_node_pointer).unwrap();
             }
 
@@ -165,22 +158,16 @@ impl TreeCache {
 
         // Shift pointers to the right
         node.pointers
-            .copy_within(index + offset..node.elements + offset, index + 1 + offset);
-        node.pointers[index + offset] = new_pointer;
+            .copy_within(index+offset..node.elements + offset, index + 1);
+        node.pointers[index+offset] = new_pointer;
 
         // Shift digests to the right
         node.digests
-            .copy_within(index + offset..node.elements + offset, index + 1 + offset);
-        node.digests[index + offset] = *new_digest;
+            .copy_within(index+offset..node.elements + offset, index + 1);
+        node.digests[index+offset] = *new_digest;
 
         node.elements += 1;
 
-        // Check the invariant
-        let mut prev_k = node.keys[0];
-        for k in 1..node.elements {
-            assert!(prev_k < node.keys[k]);
-            prev_k = node.keys[k];
-        }
         return
     }
 
@@ -204,11 +191,13 @@ impl TreeCache {
                 let right_len = NODE_CAPACITY - pivot_index;
                 right_elem = AuthTreeInternalNode::new(
                     true,
-                    right_len,
-                    &node.keys[pivot_index..node.elements],
-                    &node.pointers[pivot_index..node.elements],
-                    &node.digests[pivot_index..node.elements],
+                    right_len-1,
+                    &node.keys[pivot_index+1..node.elements],
+                    &node.pointers[pivot_index+1..node.elements],
+                    &node.digests[pivot_index+1..node.elements],
                 );
+
+            node.elements = pivot_index+1;
             }
             else {
                 // We copy the pointers
@@ -220,9 +209,18 @@ impl TreeCache {
                     &node.pointers[pivot_index+1..node.elements+1],
                     &node.digests[pivot_index+1..node.elements+1],
                 );
+                node.elements = pivot_index;
             }
 
-            node.elements = pivot_index;
+            #[cfg(debug_assertions)]
+            {
+                node.interal_check();
+                right_elem.interal_check();
+                assert!(node.keys[node.elements-1] <= pivot);
+                assert!(right_elem.keys[right_elem.elements-1] > pivot);
+            }
+
+
         } else {
             panic!("Pointer must exist in the table.")
         }
@@ -240,7 +238,7 @@ impl TreeCache {
     }
 }
 
-#[derive(Debug)]
+// #[derive(Debug)]
 struct AuthTreeInternalNode {
     leaf: bool,
     elements: usize,
@@ -296,7 +294,37 @@ impl AuthTreeInternalNode {
     fn is_full(&self) -> bool {
         self.elements == NODE_CAPACITY
     }
+
+    fn interal_check(&self) {
+        let mut prev_k = self.keys[0];
+        for k in 1..self.elements {
+            assert!(prev_k <= self.keys[k]);
+            prev_k = self.keys[k];
+        }
+    }
+
 }
+
+use std::fmt;
+
+impl fmt::Debug for AuthTreeInternalNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.leaf {
+            f.debug_struct("Leaf")
+            .field("L", &self.elements)
+            .field("K", &self.keys[..self.elements].to_vec())
+            .field("P", &self.pointers[..self.elements].to_vec())
+            .finish()
+        } else {
+            f.debug_struct("Branch")
+            .field("L", &self.elements)
+            .field("K", &self.keys[..self.elements].to_vec())
+            .field("P", &self.pointers[..self.elements+1].to_vec())
+            .finish()
+        }
+    }
+}
+
 
 #[derive(Debug)]
 struct AuthTreeEntry {
@@ -313,5 +341,31 @@ impl AuthTreeEntry {
             data: vec![],
         }
 
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_contains_not_contains() {
+
+        const EXP : u64 = 26;
+        let mut tree = TreeCache::new();
+        for num in 0..EXP {
+            tree.insert(AuthTreeEntry::get_test_entry(2*num));
+        }
+
+        for num in 0..EXP {
+            let res = tree.get(&[2*num; 4]);
+            assert!(res.unwrap().key[0] == 2*num);
+        }
+
+        for num in 0..EXP {
+            let res = tree.get(&[2*num + 1; 4]);
+            assert!(res.is_none());
+        }
     }
 }
