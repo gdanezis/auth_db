@@ -586,7 +586,7 @@ mod tests {
 
     #[test]
     fn construct_tree() {
-        const EXP : usize = 1_000_000;
+        const EXP : usize = 100_000;
         let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
         let mut iter = x.into_iter().peekable();
 
