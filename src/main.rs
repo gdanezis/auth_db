@@ -1,13 +1,24 @@
 use std::collections::HashMap;
 use tiny_keccak::{Hasher, Sha3};
-
+use std::slice;
 
 fn main() {
-    println!("Hello, world!");
-    println!(
-        "Block Size: {}",
-        std::mem::size_of::<AuthTreeInternalNode>()
-    );
+
+    use std::time::{Instant, };
+    use rand::thread_rng;
+    use rand::seq::SliceRandom;
+
+    const EXP : u64 = 200_000;
+    let mut tree = TreeCache::new();
+    let mut vec: Vec<AuthTreeEntry> = (0..EXP).map(|num| AuthTreeEntry::get_test_entry(2*num)).collect();
+    vec.shuffle(&mut thread_rng());
+
+    let vec1 = vec.clone();
+    let now = Instant::now();
+    for entry in vec1 {
+        tree.insert(entry);
+    }
+    println!("Insert New:  {}ns\ttotal: {}ms", now.elapsed().as_nanos() / EXP as u128, now.elapsed().as_millis());
 
 }
 
@@ -15,7 +26,7 @@ type AKey = [u64; 4];
 type ADigest = [u8; 224 / 8];
 type Pointer = usize;
 
-const NODE_CAPACITY: usize = 256;
+const NODE_CAPACITY: usize = 32;
 const NULL_DIGEST: ADigest = [0; 224 / 8];
 
 #[derive(Debug)]
@@ -30,8 +41,8 @@ impl TreeCache {
     fn new() -> TreeCache {
         TreeCache {
             root: None,
-            cache: HashMap::new(),
-            data:  HashMap::new(),
+            cache: HashMap::with_capacity(50000),
+            data:  HashMap::with_capacity(50000),
             next_pointer: 0,
         }
     }
@@ -64,7 +75,7 @@ impl TreeCache {
                 sha3.finalize(&mut entry_copy.digests[idx]);
             }
 
-            let mut target = self.cache.get_mut(pointer).unwrap();
+            let target = self.cache.get_mut(pointer).unwrap();
             target.digests[..target.elements+1].clone_from_slice(&entry_copy.digests[..entry_copy.elements+1]);
         }
 
@@ -105,7 +116,57 @@ impl TreeCache {
         }
     }
 
-    fn insert(&mut self, entry : AuthTreeEntry) {
+    fn insert_sorted<I>(&mut self, vals: I)
+        where
+            I: IntoIterator<Item = AuthTreeEntry>,
+    {
+        let mut iter = vals.into_iter();
+
+        let mut curent_pointer;
+        let mut block : &mut AuthTreeInternalNode;
+        let mut prev_key;
+
+        if let Some(first_entry) = iter.next() {
+
+            curent_pointer = self.insert(first_entry);
+            block = self.cache.get_mut(&curent_pointer).unwrap();
+            prev_key = block.keys[0];
+        }
+        else {
+            return
+        }
+
+        while let Some(entry) = iter.next() {
+            if block.elements < NODE_CAPACITY && prev_key <= entry.key && entry.key < block.keys[block.elements-1] {
+                let index = block.get_index(&entry.key);
+
+                if block.keys[index] != entry.key {
+
+                    // Replicate the next pointer functionality here.
+                    let entry_pointer = self.next_pointer;
+                    self.next_pointer += 1;
+
+                    block.insert_at(index, &entry.key, entry_pointer, &entry.digest);
+                    self.data.insert(entry_pointer, entry);
+                }
+                else{
+                    let entry_pointer = block.pointers[index];
+                    *self.data.get_mut(&entry_pointer).unwrap() = entry;
+                }
+            }
+            else
+            {
+                curent_pointer = self.insert(entry);
+                block = self.cache.get_mut(&curent_pointer).unwrap();
+                prev_key = block.keys[0];
+            }
+        }
+
+    }
+
+    // Returns the pointer to the Leaf Branch in which we inserted the value
+    fn insert(&mut self, entry : AuthTreeEntry) -> Pointer {
+
         if self.root.is_none(){
             // Empty tree create initial strucutre.
 
@@ -120,7 +181,7 @@ impl TreeCache {
             self.cache.insert(root_pointer, root);
 
             self.root = Some(root_pointer);
-            return;
+            return root_pointer;
         }
 
         let mut current_pointer = self.root.unwrap();
@@ -146,14 +207,14 @@ impl TreeCache {
                 let entry_pointer = self.next_pointer();
                 self.insert_at(&current_pointer, index, &entry.key, entry_pointer, &entry.digest);
                 self.data.insert(entry_pointer, entry);
-                return
+                return current_pointer;
             }
 
             // Mutate existing entry
             if current_node.leaf && current_node.keys[index] == entry.key {
                 let entry_pointer = current_node.pointers[index];
                 *self.data.get_mut(&entry_pointer).unwrap() = entry;
-                return
+                return current_pointer;
             }
 
             // This is not a leaf, it is a branch, ensure it is not empty
@@ -188,25 +249,7 @@ impl TreeCache {
         new_digest: &ADigest,
     ) {
         let node = self.cache.get_mut(pointer).unwrap();
-        let offset = if node.leaf { 0 } else { 1 };
-
-        // Shift keys to the right
-        node.keys.copy_within(index..node.elements, index + 1);
-        node.keys[index] = *key;
-
-        // Shift pointers to the right
-        node.pointers
-            .copy_within(index+offset..node.elements + offset, index + 1);
-        node.pointers[index+offset] = new_pointer;
-
-        // Shift digests to the right
-        node.digests
-            .copy_within(index+offset..node.elements + offset, index + 1);
-        node.digests[index+offset] = *new_digest;
-
-        node.elements += 1;
-
-        return
+        node.insert_at(index, key, new_pointer, new_digest);
     }
 
     fn split_node(
@@ -321,12 +364,50 @@ impl AuthTreeInternalNode {
     }
 
     fn get_index(&self, key: &AKey) -> usize {
+        let idx2 = match &self.keys[0..self.elements].binary_search(key) {
+            Ok(pos) => *pos,
+            Err(pos) => *pos,
+        };
+
+        return idx2;
+
+        /*
         for idx in 0..self.elements {
             if key <= &self.keys[idx] {
+                assert!(idx == idx2);
                 return idx;
             }
         }
         return self.elements;
+        */
+    }
+
+    fn insert_at(
+        &mut self,
+        index: usize,
+        key: &AKey,
+        new_pointer: Pointer,
+        new_digest: &ADigest,
+    ) {
+        let offset = if self.leaf { 0 } else { 1 };
+
+        // Shift keys to the right
+        self.keys.copy_within(index..self.elements, index + 1);
+        self.keys[index] = *key;
+
+        // Shift pointers to the right
+        self.pointers
+            .copy_within(index+offset..self.elements + offset, index + 1+ offset);
+            self.pointers[index+offset] = new_pointer;
+
+        // Shift digests to the right
+        self.digests
+            .copy_within(index+offset..self.elements + offset, index + 1+ offset);
+            self.digests[index+offset] = *new_digest;
+
+            self.elements += 1;
+
+        return
     }
 
     fn is_full(&self) -> bool {
@@ -364,7 +445,7 @@ impl fmt::Debug for AuthTreeInternalNode {
 }
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct AuthTreeEntry {
     key: AKey,
     digest: [u8; 224 / 8],
@@ -418,39 +499,65 @@ sha3.update(b"hello");
 mod tests {
     use super::*;
     use std::time::{Instant, };
+    use rand::thread_rng;
+    use rand::seq::SliceRandom;
 
     #[test]
     fn insert_contains_not_contains() {
 
-        const EXP : u64 = 1_000_000;
+        const EXP : u64 = 100_000;
         let mut tree = TreeCache::new();
 
         let now = Instant::now();
-        for num in 0..EXP {
-            tree.insert(AuthTreeEntry::get_test_entry(2*num));
+        let mut vec: Vec<AuthTreeEntry> = (0..EXP).map(|num| AuthTreeEntry::get_test_entry(2*num)).collect();
+        println!("Hash Alloc: {}ns\ttotal: {}ms", now.elapsed().as_nanos() / EXP as u128, now.elapsed().as_millis());
+
+        let vec_sorted = vec.clone();
+        vec.shuffle(&mut thread_rng());
+
+        let vec1 = vec.clone();
+        let now = Instant::now();
+        for entry in vec1 {
+            tree.insert(entry);
         }
-        println!("Insert: {}ns", now.elapsed().as_nanos() / EXP as u128);
+        println!("Insert New:  {}ns\ttotal: {}ms", now.elapsed().as_nanos() / EXP as u128, now.elapsed().as_millis());
+
+        vec.shuffle(&mut thread_rng());
+        // println!("Nuber of blocks: {}", tree.cache.len());
+        let vec2 = vec.clone();
+        let now = Instant::now();
+        for entry in vec2 {
+            tree.insert(entry);
+        }
+        println!("Update Old: {}ns\ttotal: {}ms", now.elapsed().as_nanos() / EXP as u128, now.elapsed().as_millis());
 
         let now = Instant::now();
+        tree.insert_sorted(vec_sorted);
+        println!("Update Sort: {}ns\ttotal: {}ms", now.elapsed().as_nanos() / EXP as u128, now.elapsed().as_millis());
+
+        let now = Instant::now();
+        // println!("Nuber of blocks: {}", tree.cache.len());
         for num in 0..EXP {
             let res = tree.get(&[2*num; 4]);
             assert!(res.unwrap().key[0] == 2*num);
         }
-        println!("Get Some: {}ns", now.elapsed().as_nanos() / EXP as u128);
+        println!("Get Some:   {}ns\ttotal: {}ms", now.elapsed().as_nanos() / EXP as u128, now.elapsed().as_millis());
 
         let now = Instant::now();
+        //println!("Nuber of blocks: {}", tree.cache.len());
         for num in 0..EXP {
             let res = tree.get(&[2*num + 1; 4]);
             assert!(res.is_none());
         }
-        println!("Get None: {}ns", now.elapsed().as_nanos() / EXP as u128);
+        println!("Get None:   {}ns\ttotal: {}ms", now.elapsed().as_nanos() / EXP as u128, now.elapsed().as_millis());
 
         let now = Instant::now();
         println!("Nuber of blocks: {}", tree.cache.len());
-        for num in 0..100 {
+        const NUM : usize = 10;
+        for num in 0..NUM {
             tree.update_hashes();
         }
-        println!("Update hashes: {}ms", now.elapsed().as_millis() / 100_u128);
+        println!("Update hashes: {}ms\ttotal: {}ms", now.elapsed().as_millis() / NUM as u128, now.elapsed().as_millis());
 
     }
 }
