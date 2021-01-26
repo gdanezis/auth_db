@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::slice;
 use tiny_keccak::{Hasher, Sha3};
+use std::iter::Iterator;
+use std::iter::Peekable;
+
 
 fn main() {
     use rand::seq::SliceRandom;
@@ -28,7 +31,7 @@ fn main() {
     );
 }
 
-const NODE_CAPACITY: usize = 30;
+const NODE_CAPACITY: usize = 128;
 const KEY_SIZE: usize = 20;
 const DIGEST_SIZE: usize = 224 / 8;
 const NULL_DIGEST: ADigest = [0; DIGEST_SIZE];
@@ -91,13 +94,15 @@ impl TreeCache {
             let number_of_returns = returns.len();
 
             // Save the new nodes in the cache, and add them to the list.
-            for ret in returns.drain(..) {
+            for mut ret in returns.drain(..) {
                 let new_pointer = self.next_pointer();
-                let new_element = AuthElement {
+                let mut new_element = AuthElement {
                     key: ret.bounds[1],
                     digest: [0; DIGEST_SIZE], // FIX (security): compute the hash here.
                     pointer: new_pointer,
                 };
+
+                ret.compute_hash(&mut new_element.digest);
                 spare_elements.push(new_element);
                 self.cache.insert(new_pointer, ret);
 
@@ -156,13 +161,16 @@ impl TreeCache {
                 self.update(returns, spare_elements, child_pointer, iter);
 
                 // Save the new nodes in the cache, and add them to the list.
-                for ret in returns.drain(intitial_returns..) {
+                for mut ret in returns.drain(intitial_returns..) {
                     let new_pointer = self.next_pointer();
-                    let new_element = AuthElement {
+                    let mut new_element = AuthElement {
                         key: ret.bounds[1],
                         digest: [0; DIGEST_SIZE], // FIX (security): compute the hash here.
                         pointer: new_pointer,
                     };
+
+                    ret.compute_hash(&mut new_element.digest);
+
                     spare_elements.push(new_element);
                     self.cache.insert(new_pointer, ret);
                 }
@@ -200,9 +208,7 @@ struct AuthTreeInternalNode {
     left_pointer: Option<(Pointer, ADigest)>,
 }
 
-use std::collections::VecDeque;
-use std::iter::Iterator;
-use std::iter::Peekable;
+
 
 impl AuthTreeInternalNode {
     fn empty(
@@ -412,6 +418,31 @@ impl AuthTreeInternalNode {
     fn is_full(&self) -> bool {
         self.elements == NODE_CAPACITY
     }
+
+
+
+    fn compute_hash(&mut self, digest_out: &mut [u8; DIGEST_SIZE]) {
+        let mut sha3 = Sha3::v224();
+
+        if self.leaf {
+            // For leafs we commit to: bounds, keys digests
+            sha3.update(&self.elements.to_be_bytes());
+            for i in 0..self.elements {
+                let elem = self.get_by_position(i);
+                sha3.update(&elem.key);
+                sha3.update(&elem.digest);
+            }
+        }
+        else {
+            // for internal nodes we commit to digests only
+            for i in 0..self.elements {
+                let elem = self.get_by_position(i);
+                sha3.update(&elem.digest);
+            }
+        }
+        sha3.finalize(digest_out);
+    }
+
 }
 
 use std::fmt;
@@ -586,7 +617,7 @@ mod tests {
 
     #[test]
     fn construct_tree() {
-        const EXP : usize = 100_000;
+        const EXP : usize = 1_000_000;
         let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
         let mut iter = x.into_iter().peekable();
 
@@ -662,21 +693,3 @@ mod tests {
     }
     */
 }
-
-/*
-fn _compute_hash(&mut self) {
-
-    // TODO: proper format
-    let mut sha3 = Sha3::v224();
-    sha3.update(
-        unsafe { std::mem::transmute::<&[u64;4],&[u8;4*8]>(&self.key) }
-        );
-    let path_len = self.path.len().to_be_bytes();
-    sha3.update(&path_len[..]);
-    sha3.update(&self.path[..]);
-    let data_len = self.data.len().to_be_bytes();
-    sha3.update(&data_len[..]);
-    sha3.update(&self.data[..]);
-    sha3.finalize(&mut self.digest[..]);
-}
-*/
