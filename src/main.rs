@@ -1,19 +1,53 @@
 use std::collections::HashMap;
 use std::slice;
 use tiny_keccak::{Hasher, Sha3};
+use rayon::prelude::*;
 use std::iter::Iterator;
 use std::iter::Peekable;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use rayon::prelude::*;
+use std::time::Instant;
 
 fn main() {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
-    use std::time::Instant;
+
+    rayon::ThreadPoolBuilder::new()
+        .thread_name(|index| format!("rayon-global-{}", index))
+        .build_global()
+        .expect("Failed to build rayon global thread pool.");
+
+    const EXP : usize = 10_000_000;
+    let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
+
+    let now = Instant::now();
+    let mut tree = TreeCache::new();
+    tree.update_with_elements(&x);
+    let dur = now.elapsed();
+    println!("  Make Tree: Branches {}. {}ns\ttotal: {}ms", tree.cache.len(), dur.as_nanos() / EXP as u128, dur.as_millis());
+
+    // Cost of second update
+    let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
+
+    let now = Instant::now();
+    // Reuse tree
+    tree.update_with_elements(&x);
+    let dur = now.elapsed();
+    println!("Update Tree: Branches {}. {}ns\ttotal: {}ms", tree.cache.len(), dur.as_nanos() / EXP as u128, dur.as_millis());
+
+    // println!("{:?}", tree.cache);
+
+    // Cost of second update
+    let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
+
+    let now = Instant::now();
+    // Reuse tree
+    tree.update_with_elements(&x);
+    let dur = now.elapsed();
+    println!("Update Tree: Branches {}. {}ns\ttotal: {}ms", tree.cache.len(), dur.as_nanos() / EXP as u128, dur.as_millis());
 
 }
 
-const NODE_CAPACITY: usize = 128;
+const NODE_CAPACITY: usize = 240;
 const KEY_SIZE: usize = 20;
 const DIGEST_SIZE: usize = 224 / 8;
 const NULL_DIGEST: ADigest = [0; DIGEST_SIZE];
@@ -60,8 +94,8 @@ impl TreeCache {
     fn new() -> TreeCache {
         TreeCache {
             root: None,
-            cache: HashMap::with_capacity(500),
-            data: HashMap::with_capacity(500),
+            cache: HashMap::with_capacity(5000),
+            data: HashMap::with_capacity(5000),
             next_pointer: AtomicUsize::new(usize::MAX / 2),
         }
     }
@@ -98,6 +132,9 @@ impl TreeCache {
 
     fn update_with_elements(&mut self, update_slice: &[AuthElement])
     {
+        let EXP = update_slice.len();
+
+        let now = Instant::now();
         // First deal with the case there is no root. Then we just make an empty one.
         let root_pointer = if self.root.is_none(){
             let root = AuthTreeInternalNode::empty(true, [MIN_KEY, MAX_KEY], None);
@@ -109,7 +146,10 @@ impl TreeCache {
         else {
             self.root.unwrap()
         };
+        let dur = now.elapsed();
+        println!("Root Pointer. {}ns\ttotal: {}ms", dur.as_nanos() / EXP as u128, dur.as_millis());
 
+        let now = Instant::now();
         // Make some temporary structures.
         let mut returns = Vec::with_capacity(NODE_CAPACITY);
         let mut spare_elements = Vec::with_capacity(NODE_CAPACITY);
@@ -119,7 +159,10 @@ impl TreeCache {
         // self.update(0, &mut work_set, &mut returns, &mut spare_elements, root_pointer, &mut iter.peekable());
         self.update_parallel(0, &mut work_set, &mut returns, &mut spare_elements, root_pointer, update_slice);
         self.apply_workset(work_set);
+        let dur = now.elapsed();
+        println!("Child Update. {}ns\ttotal: {}ms", dur.as_nanos() / EXP as u128, dur.as_millis());
 
+        let now = Instant::now();
         loop {
             // Now we reduce the number of returns by constructing the tree
 
@@ -143,6 +186,9 @@ impl TreeCache {
                     self.root = Some(new_pointer);
                     // Remove the old root
                     self.cache.remove(&root_pointer);
+
+                    let dur = now.elapsed();
+                    println!("Make Root. {}ns\ttotal: {}ms", dur.as_nanos() / EXP as u128, dur.as_millis());
                     return
                 }
             }
@@ -180,15 +226,17 @@ impl TreeCache {
 
         let this_node_len = this_node.elements;
         let positions : Vec<_> = (0..this_node_len).into_iter().collect();
-        let computed : Vec<_> = positions.into_iter().map( |i| {
+
+        println!("Parallel: {} ways", positions.len());
+        let computed : Vec<_> = positions.par_iter().map( |i| {
             let mut spare_elements : Vec<AuthElement> = Vec::new();
             let mut returns : Vec<AuthTreeInternalNode> = Vec::new();
             let mut work_set = TreeWorkSet::new();
 
-            let this_child_ref = this_node.get_by_position(i);
+            let this_child_ref = this_node.get_by_position(*i);
 
             // Compute the start position:
-            let start_position = if i > 0 {
+            let start_position = if *i > 0 {
                 let prev_child_ref = this_node.get_by_position(i-1);
                 given_elements[..]
                     .binary_search_by_key(&prev_child_ref.key, |elem| elem.key)
@@ -705,25 +753,27 @@ impl AuthTreeEntry {
     }
 }
 
+pub(crate) fn get_test_entry(num: usize) -> AuthElement {
+    let mut key = [0; KEY_SIZE];
+    let pointer = num;
+    let digest = [0; DIGEST_SIZE];
+    key[..8].clone_from_slice(&num.to_be_bytes());
+
+    AuthElement {
+        key,
+        pointer,
+        digest,
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use std::time::Instant;
 
-    fn get_test_entry(num: usize) -> AuthElement {
-        let mut key = [0; KEY_SIZE];
-        let pointer = num;
-        let digest = [0; DIGEST_SIZE];
-        key[..8].clone_from_slice(&num.to_be_bytes());
 
-        AuthElement {
-            key,
-            pointer,
-            digest,
-        }
-    }
 
     #[test]
     fn endianness_to_ord() {
@@ -753,7 +803,7 @@ mod tests {
 
     #[test]
     fn construct_leaf_with_max() {
-        let x: Vec<AuthElement> = (0..100).map(|num| get_test_entry(num)).collect();
+        let x: Vec<AuthElement> = (0..NODE_CAPACITY*2).map(|num| get_test_entry(num)).collect();
         let entry = AuthTreeInternalNode::new(
             true,
             [MIN_KEY, get_test_entry(NODE_CAPACITY / 2).key],
