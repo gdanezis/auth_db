@@ -95,8 +95,7 @@ impl TreeCache {
         }
     }
 
-    fn update_with_elements<T>(&mut self, iter: &mut Peekable<T>) where
-        T: IntoIterator<Item = AuthElement> + Iterator<Item = AuthElement>,
+    fn update_with_elements(&mut self, update_slice: &[AuthElement])
     {
         // First deal with the case there is no root. Then we just make an empty one.
         let root_pointer = if self.root.is_none(){
@@ -115,13 +114,17 @@ impl TreeCache {
         let mut spare_elements = Vec::with_capacity(NODE_CAPACITY);
 
         let mut work_set = TreeWorkSet::new();
-        self.update(&mut work_set, &mut returns, &mut spare_elements, root_pointer, iter);
+        let mut iter = update_slice.iter();
+        self.update(0, &mut work_set, &mut returns, &mut spare_elements, root_pointer, &mut iter.peekable());
         self.apply_workset(work_set);
 
         loop {
             // Now we reduce the number of returns by constructing the tree
 
             let number_of_returns = returns.len();
+            if returns.len() == 1 {
+                println!("Root pointers: {}", returns[0].elements);
+            }
 
             // Save the new nodes in the cache, and add them to the list.
             for mut ret in returns.drain(..) {
@@ -150,20 +153,22 @@ impl TreeCache {
             new_root.split_update(
                 &mut returns,
                 spare_elements.len(),
-                &mut spare_elements.drain(..).peekable(),
+                &mut spare_elements[..].iter().peekable(),
             );
+            spare_elements.clear();
         }
     }
 
-    fn update<T>(
+    fn update<'x, T>(
         &self,
+        depth: usize,
         work_set : &mut TreeWorkSet,
         returns: &mut Vec<AuthTreeInternalNode>,
         spare_elements: &mut Vec<AuthElement>,
         pointer: Pointer,
         iter: &mut Peekable<T>,
     ) where
-        T: IntoIterator<Item = AuthElement> + Iterator<Item = AuthElement>,
+        T: Iterator<Item = &'x AuthElement>
     {
         let mut this_node = &self.cache[&pointer];
         let intitial_returns = returns.len();
@@ -179,17 +184,22 @@ impl TreeCache {
         // This is an internal node
         let this_node_len = this_node.elements;
         for i in 0..this_node_len {
-            let peek_next = iter.peek();
-
             let this_child_ref = this_node.get_by_position(i);
-            if peek_next.is_none() || !(peek_next.unwrap().key <= this_child_ref.key) {
-                // We do not need to explore in this child, so we simply add the element to the spares list
-                spare_elements.push(*this_child_ref) // FIX (perf): COPY HERE
-            } else {
+            {
+                let peek_next = iter.peek();
+
+                if peek_next.is_none() || !(peek_next.unwrap().key <= this_child_ref.key) {
+                    // We do not need to explore in this child, so we simply add the element to the spares list
+                    spare_elements.push(*this_child_ref); // FIX (perf): COPY HERE
+                    continue
+                }
+            }
+
+            {
                 // We need to explore down this child
                 let child_pointer = this_child_ref.pointer;
                 drop(this_node);
-                self.update(work_set, returns, spare_elements, child_pointer, iter);
+                self.update(depth+1, work_set, returns, spare_elements, child_pointer, iter);
 
                 // Save the new nodes in the cache, and add them to the list.
                 for mut ret in returns.drain(intitial_returns..) {
@@ -214,8 +224,9 @@ impl TreeCache {
         this_node.split_update(
             returns,
             spare_elements.len() - intitial_spare_elements,
-            &mut spare_elements.drain(intitial_spare_elements..).peekable(),
+            &mut spare_elements[intitial_spare_elements..].iter().peekable(),
         );
+        spare_elements.truncate(intitial_spare_elements);
 
         // assert!(self.cache.remove(&pointer).is_some());
         work_set.remove.push(pointer);
@@ -292,7 +303,7 @@ impl AuthTreeInternalNode {
         new_node
     }
 
-    fn new<T>(
+    fn new<'x, T>(
         leaf: bool,
         mut bounds: [AKey; 2],
         left_pointer: Option<(Pointer, ADigest)>,
@@ -300,7 +311,7 @@ impl AuthTreeInternalNode {
         capacity: usize,
     ) -> AuthTreeInternalNode
     where
-        T: IntoIterator<Item = AuthElement> + Iterator<Item = AuthElement>,
+        T: Iterator<Item = &'x AuthElement>
     {
         if !leaf && left_pointer.is_some() {
             panic!("Leaf cannot have left pointer");
@@ -412,13 +423,13 @@ impl AuthTreeInternalNode {
         &self.items[inner_position as usize]
     }
 
-    fn merge<T>(
+    fn merge<'x, T>(
         &self,
         returns: &mut Vec<Self>,
         spare_elements: &mut Vec<AuthElement>,
         iter: &mut Peekable<T>,
     ) where
-        T: IntoIterator<Item = AuthElement> + Iterator<Item = AuthElement>,
+        T: Iterator<Item = &'x AuthElement>
     {
         // Inefficient, but correct to start with:
         let mut position = 0; // The position we are in this block.
@@ -453,13 +464,13 @@ impl AuthTreeInternalNode {
                 || new_element.key < self.get_by_position(position).key
             {
                 // The iterator element takes priority.
-                spare_elements.push(new_element);
+                spare_elements.push(*new_element);
                 continue;
             }
 
             if new_element.key == self.get_by_position(position).key {
                 // The new element takes priority AND we drop the self element (replace)
-                spare_elements.push(new_element);
+                spare_elements.push(*new_element);
                 position += 1;
                 continue;
             }
@@ -468,13 +479,14 @@ impl AuthTreeInternalNode {
         // Now we have a list (spare_elements) with element we need to make one or more
         // AuthTreeInternalNode with.
         let size = spare_elements.len() - initial_spare_elements;
-        let xref = &mut spare_elements.drain(initial_spare_elements..).peekable();
+        let xref = &mut spare_elements[initial_spare_elements..].iter().peekable();
         self.split_update(returns, size, xref);
+        spare_elements.truncate(initial_spare_elements);
     }
 
-    fn split_update<T>(&self, returns: &mut Vec<Self>, size: usize, xref: &mut Peekable<T>)
+    fn split_update<'x, T>(&self, returns: &mut Vec<Self>, size: usize, xref: &mut Peekable<T>)
     where
-        T: IntoIterator<Item = AuthElement> + Iterator<Item = AuthElement>,
+        T: Iterator<Item = &'x AuthElement>,
     {
         // Compute the averageoccupancy of a block:
         let mut num_of_blocks = size / NODE_CAPACITY;
@@ -635,7 +647,7 @@ mod tests {
             true,
             [MIN_KEY, MAX_KEY],
             None,
-            &mut x.into_iter().peekable(),
+            &mut x.iter().peekable(),
             NODE_CAPACITY,
         );
 
@@ -652,7 +664,7 @@ mod tests {
             true,
             [MIN_KEY, get_test_entry(NODE_CAPACITY / 2).key],
             None,
-            &mut x.into_iter().peekable(),
+            &mut x.iter().peekable(),
             NODE_CAPACITY,
         );
 
@@ -663,12 +675,11 @@ mod tests {
     #[test]
     fn construct_two_leaf_with_max() {
         let x: Vec<AuthElement> = (0..100).map(|num| get_test_entry(num)).collect();
-        let x2 = &mut x.into_iter();
         let entry = AuthTreeInternalNode::new(
             true,
             [MIN_KEY, get_test_entry(NODE_CAPACITY / 2).key],
             None,
-            &mut x2.into_iter().peekable(),
+            &mut x.iter().peekable(),
             NODE_CAPACITY,
         );
 
@@ -679,7 +690,7 @@ mod tests {
             true,
             [MIN_KEY, get_test_entry(NODE_CAPACITY + NODE_CAPACITY / 2).key],
             None,
-            &mut x2.into_iter().peekable(),
+            &mut x.iter().peekable(),
             NODE_CAPACITY,
         );
 
@@ -689,7 +700,7 @@ mod tests {
     #[test]
     fn construct_leaf_with_merge_simple() {
         let x: Vec<AuthElement> = (0..100).map(|num| get_test_entry(num)).collect();
-        let mut iter = x.into_iter().peekable();
+        let mut iter = x.iter().peekable();
         let mut entry = AuthTreeInternalNode::new(true, [MIN_KEY, MAX_KEY], None, &mut iter, NODE_CAPACITY);
 
         entry.bounds = [MIN_KEY, MAX_KEY];
@@ -706,7 +717,7 @@ mod tests {
     #[test]
     fn construct_leaf_with_merge_empty_start() {
         let x: Vec<AuthElement> = (0..100).map(|num| get_test_entry(num)).collect();
-        let mut iter = x.into_iter().peekable();
+        let mut iter = x.iter().peekable();
 
         let mut entry = AuthTreeInternalNode::empty(true, [MIN_KEY, MAX_KEY], None);
 
@@ -727,11 +738,11 @@ mod tests {
         const EXP : usize = 100;
         let found: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
 
-        let mut iter = found.clone().into_iter().peekable();
+        let mut iter = found.iter().peekable();
 
         // Build tree
         let mut tree = TreeCache::new();
-        tree.update_with_elements(&mut iter);
+        tree.update_with_elements(&found);
 
         // Ensure all elements are there
         assert!(tree.walk().len() == EXP);
@@ -747,7 +758,7 @@ mod tests {
             }).collect();
         let mut iter = new_found.clone().into_iter().peekable();
         // Reuse tree
-        tree.update_with_elements(&mut iter);
+        tree.update_with_elements(&new_found);
 
         let v : Vec<Pointer> = tree.walk().iter().map(|elem| elem.pointer).collect();
         // println!("{:?}", v);
@@ -763,12 +774,9 @@ mod tests {
         let found: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(2*num)).collect();
         let notfound: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(2*num+1)).collect();
 
-        let mut iter = found.clone().into_iter().peekable();
-
-
         // Build tree
         let mut tree = TreeCache::new();
-        tree.update_with_elements(&mut iter);
+        tree.update_with_elements(&found);
 
 
         // Ensure all elements are there
@@ -791,9 +799,9 @@ mod tests {
         }
 
         // Update tree
-        let mut iter = found.clone().into_iter().peekable();
+
         // Reuse tree
-        tree.update_with_elements(&mut iter);
+        tree.update_with_elements(&found);
 
         assert!(tree.walk().len() == 1000);
 
@@ -818,20 +826,19 @@ mod tests {
     fn construct_tree() {
         const EXP : usize = 1_000_000;
         let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
-        let mut iter = x.into_iter().peekable();
 
         let now = Instant::now();
         let mut tree = TreeCache::new();
-        tree.update_with_elements(&mut iter);
+        tree.update_with_elements(&x);
         let dur = now.elapsed();
         println!("   Make Tree: Branches {}. {}ns\ttotal: {}ms", tree.cache.len(), dur.as_nanos() / EXP as u128, dur.as_millis());
 
         // Cost of second update
         let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
-        let mut iter = x.into_iter().peekable();
+
         let now = Instant::now();
         // Reuse tree
-        tree.update_with_elements(&mut iter);
+        tree.update_with_elements(&x);
         let dur = now.elapsed();
         println!("Update Tree: Branches {}. {}ns\ttotal: {}ms", tree.cache.len(), dur.as_nanos() / EXP as u128, dur.as_millis());
 
@@ -839,10 +846,10 @@ mod tests {
 
         // Cost of second update
         let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
-        let mut iter = x.into_iter().peekable();
+
         let now = Instant::now();
         // Reuse tree
-        tree.update_with_elements(&mut iter);
+        tree.update_with_elements(&x);
         let dur = now.elapsed();
         println!("Update Tree: Branches {}. {}ns\ttotal: {}ms", tree.cache.len(), dur.as_nanos() / EXP as u128, dur.as_millis());
 
