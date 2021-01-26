@@ -10,28 +10,9 @@ fn main() {
     use rand::thread_rng;
     use std::time::Instant;
 
-    const EXP: u64 = 200_000;
-    let mut tree = TreeCache::new();
-    let mut vec: Vec<AuthTreeEntry> = (0..EXP)
-        .map(|num| AuthTreeEntry::get_test_entry(2 * num))
-        .collect();
-    vec.shuffle(&mut thread_rng());
-
-    let vec1 = vec.clone();
-    let now = Instant::now();
-    /*
-    for entry in vec1 {
-        tree.insert(entry);
-    }
-    */
-    println!(
-        "Insert New:  {}ns\ttotal: {}ms",
-        now.elapsed().as_nanos() / EXP as u128,
-        now.elapsed().as_millis()
-    );
 }
 
-const NODE_CAPACITY: usize = 16;
+const NODE_CAPACITY: usize = 128;
 const KEY_SIZE: usize = 20;
 const DIGEST_SIZE: usize = 224 / 8;
 const NULL_DIGEST: ADigest = [0; DIGEST_SIZE];
@@ -102,15 +83,11 @@ impl TreeCache {
             return GetPointer::NotFound;
         }
 
-        println!("{:?}", &self.cache);
-
         let mut next_pointer = self.root.unwrap();
         loop {
             let next_node = &self.cache[&next_pointer];
-            println!("{:?}",next_node);
             match next_node.get(key) {
                 GetPointer::Goto(p) => {
-                    println!("GOTO {}", p);
                     next_pointer = p;
                 },
                 x => return x,
@@ -314,27 +291,33 @@ impl AuthTreeInternalNode {
             let peek_element = iter.peek();
 
             // We have no more items to include so we stop
-            // we keep as the right bound what we were given.
             if peek_element.is_none() {
-                break;
-            }
-
-            // The node is full we now must stop
-            // we set as its bound the key of the next first element
-            if new_node.elements == capacity {
-                new_node.bounds[1] = peek_element.unwrap().key; // Set the last key as max right bound
+                // Since we may be able to add more elements here
+                // we extend the bound to what we were given.
+                new_node.bounds[1] = bounds[1];
                 break;
             }
 
             // The next element is too large, bail out
             let peek_key = peek_element.unwrap().key;
-            if !(peek_key < bounds[1] || peek_key == MAX_KEY) {
+            if !(peek_key <= bounds[1]) {
+                // Since we may be able to add more elements here
+                // we extend the bound to what we were given.
+                new_node.bounds[1] = bounds[1];
+                break;
+            }
+
+            // The node is full but there are more
+            // elements in the stream.
+            if new_node.elements == capacity {
+                // we keep the right bound as the largest element.
                 break;
             }
 
             // Safe to unwrap due to previous check.
             let new_element = iter.next().unwrap();
             new_node.push_sorted(&new_element);
+            new_node.bounds[1] = new_element.key;
 
         }
 
@@ -342,6 +325,9 @@ impl AuthTreeInternalNode {
         let mut old_key = None;
         for i in 0..new_node.elements {
             let elem = new_node.get_by_position(i);
+            if !(new_node.bounds[0] <= elem.key) {
+                println!("{:?}", new_node);
+            }
             assert!(new_node.bounds[0] <= elem.key);
             assert!(elem.key <= new_node.bounds[1]);
             if let Some(old_val) = old_key {
@@ -369,17 +355,13 @@ impl AuthTreeInternalNode {
                 }
 
             }
-            let mut v = [0_u8; 8];
-            v.clone_from_slice(&key[..8]);
-            println!("Looking for {:?}", v);
-            println!("{:?}", self);
 
-            unreachable!();
+            return GetPointer::NotFound;
         }
         else {
             for i in 0..self.elements {
                 let elem = self.get_by_position(i);
-                if elem.key > *key {
+                if elem.key >= *key {
                     return GetPointer::Goto(elem.pointer);
                 }
             }
@@ -419,7 +401,7 @@ impl AuthTreeInternalNode {
         loop {
             let peek_element = iter.peek();
             if peek_element.is_some() {
-                if !(peek_element.unwrap().key < self.bounds[1]) {
+                if !(peek_element.unwrap().key <= self.bounds[1]) {
                     // We ran out of elements within the appropriate bounds.
                     break;
                 }
@@ -486,22 +468,26 @@ impl AuthTreeInternalNode {
         let mut min_key = self.bounds[0];
         loop {
             if xref.peek().is_none() {
-                // No elements reamining to be added, so we stop.
+                // No elements remainings to be added, so we stop.
                 break;
             }
 
+            /*
             if number_added > 0 {
                 // Min key is the first element (except for first block)
                 min_key = xref.peek().unwrap().key;
             }
+            */
 
-            if !(min_key < self.bounds[1] || min_key == MAX_KEY) {
+            let next_key = xref.peek().unwrap().key;
+            if !(next_key <= self.bounds[1]) {
                 // We have ran out of elements for this block.
                 break
             }
 
             // Create the entry
-            let mut entry = AuthTreeInternalNode::new(
+            // println!("{:?}", [min_key, self.bounds[1]]);
+            let entry = AuthTreeInternalNode::new(
                 self.leaf,
                 [min_key, self.bounds[1]],
                 None,
@@ -511,11 +497,11 @@ impl AuthTreeInternalNode {
 
             // Update the past block added max-key according to the
             // min bound of this block.
-            if number_added > 0 {
-                returns.last_mut().unwrap().bounds[1] = entry.bounds[0];
-            }
+            //if number_added > 0 {
+            //    returns.last_mut().unwrap().bounds[1] = entry.bounds[0];
+            //}
 
-            entry.bounds[1] = self.bounds[1];
+            //entry.bounds[1] = self.bounds[1];
             returns.push(entry);
             number_added += 1;
         }
@@ -647,7 +633,9 @@ mod tests {
         );
 
         assert!(entry.elements == NODE_CAPACITY);
-        assert!(entry.bounds[1] > get_test_entry(NODE_CAPACITY-1).key);
+
+        // println!("{:?} {:?}", entry.bounds[1], get_test_entry(NODE_CAPACITY-1).key);
+        assert!(entry.bounds[1] >= get_test_entry(NODE_CAPACITY-1).key);
     }
 
     #[test]
@@ -661,7 +649,7 @@ mod tests {
             NODE_CAPACITY,
         );
 
-        assert!(entry.elements == NODE_CAPACITY / 2);
+        assert!(entry.elements == 1 + NODE_CAPACITY / 2);
         assert!(entry.bounds[1] == get_test_entry(NODE_CAPACITY / 2).key);
     }
 
@@ -677,6 +665,9 @@ mod tests {
             NODE_CAPACITY,
         );
 
+        assert!(entry.elements == 1 + NODE_CAPACITY / 2);
+        assert!(entry.bounds[1] == get_test_entry(NODE_CAPACITY / 2).key);
+
         let entry = AuthTreeInternalNode::new(
             true,
             [MIN_KEY, get_test_entry(NODE_CAPACITY + NODE_CAPACITY / 2).key],
@@ -685,7 +676,6 @@ mod tests {
             NODE_CAPACITY,
         );
 
-        assert!(entry.elements == NODE_CAPACITY-1);
         assert!(entry.bounds[1] == get_test_entry(NODE_CAPACITY + NODE_CAPACITY / 2).key);
     }
 
@@ -724,7 +714,7 @@ mod tests {
         assert!(returns.len() > 0);
     }
 
-    /*
+
     #[test]
     fn test_gets(){
         const EXP : usize = 1_000;
@@ -746,12 +736,19 @@ mod tests {
             }
         }
 
+        for key_not_exists in &notfound{
+            match tree.get(&key_not_exists.key) {
+                GetPointer::NotFound => {},
+                _ => panic!("Should NOT find the key."),
+            }
+        }
+
         // Update tree
         let mut iter = found.clone().into_iter().peekable();
         // Reuse tree
         tree.update_with_elements(&mut iter);
     }
-    */
+
 
     #[test]
     fn construct_tree() {
