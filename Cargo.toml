@@ -9,3 +9,4 @@ edition = "2018"
 [dependencies]
 tiny-keccak = { version = "2.0", features = ["sha3"] }
 rand = "0.8.2"
+rayon = "1.5"
