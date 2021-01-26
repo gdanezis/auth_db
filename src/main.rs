@@ -12,7 +12,7 @@ fn main() {
 
 }
 
-const NODE_CAPACITY: usize = 5;
+const NODE_CAPACITY: usize = 128;
 const KEY_SIZE: usize = 20;
 const DIGEST_SIZE: usize = 224 / 8;
 const NULL_DIGEST: ADigest = [0; DIGEST_SIZE];
@@ -719,7 +719,7 @@ mod tests {
 
     #[test]
     fn test_walk(){
-        const EXP : usize = 1_000;
+        const EXP : usize = 100;
         let found: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
 
         let mut iter = found.clone().into_iter().peekable();
@@ -729,22 +729,26 @@ mod tests {
         tree.update_with_elements(&mut iter);
 
         // Ensure all elements are there
-        assert!(tree.walk().len() == 1000);
+        assert!(tree.walk().len() == EXP);
         tree.walk().iter().zip(found.clone()).for_each(|(elem, base_truth)| {
             assert!(elem.pointer == base_truth.pointer);
         });
 
         // Update tree
-        let found: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
-        let mut iter = found.clone().into_iter().peekable();
+        let new_found: Vec<AuthElement> = (0..EXP).map(|num| {
+                let mut elem = get_test_entry(num);
+                elem.pointer += 1_000_000;
+                elem
+            }).collect();
+        let mut iter = new_found.clone().into_iter().peekable();
         // Reuse tree
         tree.update_with_elements(&mut iter);
 
         let v : Vec<Pointer> = tree.walk().iter().map(|elem| elem.pointer).collect();
-        //println!("{:?}", v);
-        assert!(tree.walk().len() == 1000);
+        // println!("{:?}", v);
+        assert!(tree.walk().len() == EXP);
         tree.walk().iter().zip(found.clone()).for_each(|(elem, base_truth)| {
-            assert!(elem.pointer == base_truth.pointer);
+            assert!(elem.pointer == 1_000_000 + base_truth.pointer);
         });
     }
 
