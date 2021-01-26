@@ -114,7 +114,9 @@ impl TreeCache {
         let mut returns = Vec::with_capacity(NODE_CAPACITY);
         let mut spare_elements = Vec::with_capacity(NODE_CAPACITY);
 
-        self.update(&mut returns, &mut spare_elements, root_pointer, iter);
+        let mut work_set = TreeWorkSet::new();
+        self.update(&mut work_set, &mut returns, &mut spare_elements, root_pointer, iter);
+        self.apply_workset(work_set);
 
         loop {
             // Now we reduce the number of returns by constructing the tree
@@ -154,7 +156,8 @@ impl TreeCache {
     }
 
     fn update<T>(
-        &mut self,
+        &self,
+        work_set : &mut TreeWorkSet,
         returns: &mut Vec<AuthTreeInternalNode>,
         spare_elements: &mut Vec<AuthElement>,
         pointer: Pointer,
@@ -168,7 +171,8 @@ impl TreeCache {
 
         if this_node.leaf {
             this_node.merge(returns, spare_elements, iter);
-            assert!(self.cache.remove(&pointer).is_some());
+            // assert!(self.cache.remove(&pointer).is_some());
+            work_set.remove.push(pointer);
             return;
         }
 
@@ -185,7 +189,7 @@ impl TreeCache {
                 // We need to explore down this child
                 let child_pointer = this_child_ref.pointer;
                 drop(this_node);
-                self.update(returns, spare_elements, child_pointer, iter);
+                self.update(work_set, returns, spare_elements, child_pointer, iter);
 
                 // Save the new nodes in the cache, and add them to the list.
                 for mut ret in returns.drain(intitial_returns..) {
@@ -199,7 +203,7 @@ impl TreeCache {
                     ret.compute_hash(&mut new_element.digest);
 
                     spare_elements.push(new_element);
-                    self.cache.insert(new_pointer, ret);
+                    work_set.cache.insert(new_pointer, ret);
                 }
 
                 // Now get back the node we were considering
@@ -213,7 +217,8 @@ impl TreeCache {
             &mut spare_elements.drain(intitial_spare_elements..).peekable(),
         );
 
-        assert!(self.cache.remove(&pointer).is_some());
+        // assert!(self.cache.remove(&pointer).is_some());
+        work_set.remove.push(pointer);
     }
 
     fn walk(&self) -> Vec<AuthElement> {
