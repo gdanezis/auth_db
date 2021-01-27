@@ -16,7 +16,7 @@ fn main() {
         .build_global()
         .expect("Failed to build rayon global thread pool.");
 
-    const EXP : usize = 2_000_000;
+    const EXP : usize = 1_000_000;
     let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
 
     let now = Instant::now();
@@ -26,19 +26,13 @@ fn main() {
     println!("  Make Tree: Branches {}. {}ns\ttotal: {}ms", tree.cache.len(), dur.as_nanos() / EXP as u128, dur.as_millis());
 
     // Cost of second update
-    //let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
-
     let now = Instant::now();
     // Reuse tree
     tree.update_with_elements(&x);
     let dur = now.elapsed();
     println!("Update Tree: Branches {}. {}ns\ttotal: {}ms", tree.cache.len(), dur.as_nanos() / EXP as u128, dur.as_millis());
 
-    // println!("{:?}", tree.cache);
-
     // Cost of second update
-    //let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
-
     let now = Instant::now();
     // Reuse tree
     tree.update_with_elements(&x);
@@ -47,7 +41,7 @@ fn main() {
 
 }
 
-const NODE_CAPACITY: usize = 240;
+const NODE_CAPACITY: usize = 128;
 const KEY_SIZE: usize = 20;
 const DIGEST_SIZE: usize = 224 / 8;
 const NULL_DIGEST: ADigest = [0; DIGEST_SIZE];
@@ -158,11 +152,12 @@ impl TreeCache {
         // let mut iter = update_slice.iter();
         // self.update(0, &mut work_set, &mut returns, &mut spare_elements, root_pointer, &mut iter.peekable());
         self.update_parallel(0, &mut work_set, &mut returns, &mut spare_elements, root_pointer, update_slice);
-        self.apply_workset(work_set);
+
         let dur = now.elapsed();
         println!("Child Update. {}ns\ttotal: {}ms", dur.as_nanos() / EXP as u128, dur.as_millis());
 
         let now = Instant::now();
+        self.apply_workset(work_set);
         loop {
             // Now we reduce the number of returns by constructing the tree
 
