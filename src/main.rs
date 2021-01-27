@@ -14,7 +14,7 @@ fn main() {
         .build_global()
         .expect("Failed to build rayon global thread pool.");
 
-    const EXP: usize = 5_000_000;
+    const EXP: usize = 1_000_000;
     let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
 
     let now = Instant::now();
