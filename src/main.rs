@@ -15,7 +15,7 @@ fn main() {
         .expect("Failed to build rayon global thread pool.");
 
     const EXP: usize = 1_000_000;
-    let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
+    let x: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Insert(get_test_entry(num))).collect();
 
     let now = Instant::now();
     let mut tree = TreeCache::new();
@@ -135,7 +135,7 @@ impl TreeCache {
         }
     }
 
-    fn update_with_elements(&mut self, update_slice: &[AuthElement]) {
+    fn update_with_elements(&mut self, update_slice: &[AuthOp]) {
         let num_elements = update_slice.len();
 
         let now = Instant::now();
@@ -231,7 +231,7 @@ impl TreeCache {
         returns: &mut Vec<Box<AuthTreeInternalNode>>,
         spare_elements: &mut Vec<AuthElement>,
         pointer: Pointer,
-        given_elements: &[AuthElement],
+        given_elements: &[AuthOp],
     ) {
 
         // println!("Wait for lock {}", pointer);
@@ -273,7 +273,7 @@ impl TreeCache {
                 let start_position = if *i > 0 {
                     let prev_child_ref = this_node.get_by_position(i - 1);
                     given_elements[..]
-                        .binary_search_by_key(&prev_child_ref.key, |elem| elem.key)
+                        .binary_search_by_key(&prev_child_ref.key, |elem| *elem.key())
                         .map(|x| x + 1)
                         .unwrap_or_else(|x| x)
                 } else {
@@ -282,7 +282,7 @@ impl TreeCache {
 
                 // Compute the end position:
                 let end_position = given_elements[..]
-                    .binary_search_by_key(&this_child_ref.key, |elem| elem.key)
+                    .binary_search_by_key(&this_child_ref.key, |elem| *elem.key())
                     .map(|x| x + 1)
                     .unwrap_or_else(|x| x);
 
@@ -365,7 +365,7 @@ impl TreeCache {
         pointer: Pointer,
         iter: &mut Peekable<T>,
     ) where
-        T: Iterator<Item = &'x AuthElement>,
+        T: Iterator<Item = &'x AuthOp>,
     {
         let mut node_guard = self.cache[&pointer].lock();
         let this_node = &node_guard;
@@ -410,7 +410,7 @@ impl TreeCache {
 
             let peek_next = iter.peek();
 
-            if peek_next.is_none() || !(peek_next.unwrap().key <= this_child_ref.key) {
+            if peek_next.is_none() || !(peek_next.unwrap().key() <= &this_child_ref.key) {
                 // We do not need to explore in this child, so we simply add the element to the spares list
                 spare_elements.push(*this_child_ref); // FIX (perf): COPY HERE
                 continue;
@@ -474,6 +474,28 @@ impl TreeCache {
                 self._walk(elem.pointer, result);
             }
         }
+    }
+}
+
+#[derive(Clone)]
+enum AuthOp {
+    Insert(AuthElement),
+    Delete(AKey),
+}
+
+impl AuthOp {
+    fn key(&self) -> &AKey {
+        match self {
+            AuthOp::Insert(elem) => &elem.key,
+            AuthOp::Delete(key) => key,
+        }
+    }
+
+    fn unwrap_insert(&self) -> &AuthElement {
+        if let AuthOp::Insert(elem) = &self {
+            return elem;
+        }
+        panic!("Expected an Insert.")
     }
 }
 
@@ -544,8 +566,8 @@ impl AuthTreeInternalNode {
             }
 
             // The next element is too large, bail out
-            let peek_key = peek_element.unwrap().key;
-            if !(peek_key <= bounds[1]) {
+            let peek_key = &peek_element.unwrap().key;
+            if !(peek_key <= &bounds[1]) {
                 // Since we may be able to add more elements here
                 // we extend the bound to what we were given.
                 new_node.bounds[1] = bounds[1];
@@ -561,7 +583,7 @@ impl AuthTreeInternalNode {
 
             // Safe to unwrap due to previous check.
             let new_element = iter.next().unwrap();
-            new_node.push_sorted(&new_element);
+            new_node.push_sorted(new_element);
             new_node.bounds[1] = new_element.key;
         }
 
@@ -631,7 +653,7 @@ impl AuthTreeInternalNode {
         spare_elements: &mut Vec<AuthElement>,
         iter: &mut Peekable<T>,
     ) where
-        T: Iterator<Item = &'x AuthElement>,
+        T: Iterator<Item = &'x AuthOp>,
     {
         // Inefficient, but correct to start with:
         let mut position = 0; // The position we are in this block.
@@ -642,7 +664,7 @@ impl AuthTreeInternalNode {
 
             let self_list_finished: bool = !(position < self.elements);
             let iter_finished: bool =
-                peek_element.is_none() || !(peek_element.unwrap().key <= self.bounds[1]);
+                peek_element.is_none() || !(peek_element.unwrap().key() <= &self.bounds[1]);
 
             // If both are finished the break, we are done
             if self_list_finished && iter_finished {
@@ -651,7 +673,7 @@ impl AuthTreeInternalNode {
 
             // If iterator is finished OR next iterator key is larger than self key
             if !self_list_finished
-                && (iter_finished || self.get_by_position(position).key < peek_element.unwrap().key)
+                && (iter_finished || &self.get_by_position(position).key < peek_element.unwrap().key())
             {
                 spare_elements.push(*self.get_by_position(position));
                 position += 1;
@@ -663,16 +685,22 @@ impl AuthTreeInternalNode {
             let new_element = iter.next().unwrap();
 
             if (self_list_finished && !iter_finished)
-                || new_element.key < self.get_by_position(position).key
+                || new_element.key() < &self.get_by_position(position).key
             {
                 // The iterator element takes priority.
-                spare_elements.push(*new_element);
+                if let AuthOp::Insert(elem) = new_element{
+                    spare_elements.push(*elem);
+                }
+                // Simply ignore they keys to be deleted if not in DB
                 continue;
             }
 
-            if new_element.key == self.get_by_position(position).key {
+            if new_element.key() == &self.get_by_position(position).key {
                 // The new element takes priority AND we drop the self element (replace)
-                spare_elements.push(*new_element);
+                if let AuthOp::Insert(elem) = new_element{
+                    spare_elements.push(*elem);
+                }
+                // Skip to delete
                 position += 1;
                 continue;
             }
@@ -705,8 +733,8 @@ impl AuthTreeInternalNode {
                 break;
             }
 
-            let next_key = xref.peek().unwrap().key;
-            if !(next_key <= self.bounds[1]) {
+            let next_key = &xref.peek().unwrap().key;
+            if !(next_key <= &self.bounds[1]) {
                 // We have ran out of elements for this block.
                 break;
             }
@@ -889,12 +917,16 @@ pub(crate) mod tests {
 
     #[test]
     fn construct_leaf_with_merge_simple() {
-        let x: Vec<AuthElement> = (0..100).map(|num| get_test_entry(num)).collect();
+        let x: Vec<AuthElement> = (0..NODE_CAPACITY*10).map(|num| get_test_entry(num)).collect();
         let mut iter = x.iter().peekable();
         let mut entry =
             AuthTreeInternalNode::new(true, [MIN_KEY, MAX_KEY], &mut iter, NODE_CAPACITY);
 
         entry.bounds = [MIN_KEY, MAX_KEY];
+
+
+        let x: Vec<AuthOp> = (NODE_CAPACITY..NODE_CAPACITY*10).map(|num| AuthOp::Insert(get_test_entry(num))).collect();
+        let mut iter = x.iter().peekable();
 
         let mut returns = Vec::new();
         let mut spares = Vec::new();
@@ -907,7 +939,7 @@ pub(crate) mod tests {
 
     #[test]
     fn construct_leaf_with_merge_empty_start() {
-        let x: Vec<AuthElement> = (0..100).map(|num| get_test_entry(num)).collect();
+        let x: Vec<AuthOp> = (0..100).map(|num| AuthOp::Insert(get_test_entry(num))).collect();
         let mut iter = x.iter().peekable();
 
         let mut entry = AuthTreeInternalNode::empty(true, [MIN_KEY, MAX_KEY]);
@@ -926,7 +958,7 @@ pub(crate) mod tests {
     #[test]
     fn test_walk() {
         const EXP: usize = 20;
-        let found: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
+        let found: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Insert(get_test_entry(num))).collect();
 
         let mut iter = found.iter().peekable();
 
@@ -940,15 +972,15 @@ pub(crate) mod tests {
             .iter()
             .zip(found.clone())
             .for_each(|(elem, base_truth)| {
-                assert!(elem.pointer == base_truth.pointer);
+                assert!(elem.pointer == base_truth.unwrap_insert().pointer);
             });
 
         // Update tree
-        let new_found: Vec<AuthElement> = (0..EXP)
+        let new_found: Vec<AuthOp> = (0..EXP)
             .map(|num| {
                 let mut elem = get_test_entry(num);
                 elem.pointer += 1_000_000;
-                elem
+                AuthOp::Insert(elem)
             })
             .collect();
         let mut iter = new_found.clone().into_iter().peekable();
@@ -962,15 +994,15 @@ pub(crate) mod tests {
             .iter()
             .zip(found.clone())
             .for_each(|(elem, base_truth)| {
-                assert!(elem.pointer == 1_000_000 + base_truth.pointer);
+                assert!(elem.pointer == 1_000_000 + base_truth.unwrap_insert().pointer);
             });
     }
 
     #[test]
     fn test_gets() {
         const EXP: usize = 1_000;
-        let found: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(2 * num)).collect();
-        let notfound: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(2 * num + 1)).collect();
+        let found: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Insert(get_test_entry(2 * num))).collect();
+        let notfound: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Insert(get_test_entry(2 * num + 1))).collect();
 
         // Build tree
         let mut tree = TreeCache::new();
@@ -982,14 +1014,14 @@ pub(crate) mod tests {
         tree.get(&get_test_entry(390).key);
 
         for key_exists in &found {
-            match tree.get(&key_exists.key) {
-                GetPointer::Found(x) => assert!(x == key_exists.pointer),
+            match tree.get(&key_exists.key()) {
+                GetPointer::Found(x) => assert!(x == key_exists.unwrap_insert().pointer),
                 _ => panic!("Should find the key."),
             }
         }
 
         for key_not_exists in &notfound {
-            match tree.get(&key_not_exists.key) {
+            match tree.get(&key_not_exists.key()) {
                 GetPointer::NotFound => {}
                 _ => panic!("Should NOT find the key."),
             }
@@ -1005,14 +1037,14 @@ pub(crate) mod tests {
         assert!(tree.walk().len() == 1000);
 
         for key_exists in &found {
-            match tree.get(&key_exists.key) {
-                GetPointer::Found(x) => assert!(x == key_exists.pointer),
+            match tree.get(&key_exists.key()) {
+                GetPointer::Found(x) => assert!(x == key_exists.unwrap_insert().pointer),
                 _ => panic!("Should find the key."),
             }
         }
 
         for key_not_exists in &notfound {
-            match tree.get(&key_not_exists.key) {
+            match tree.get(&key_not_exists.key()) {
                 GetPointer::NotFound => {}
                 _ => panic!("Should NOT find the key."),
             }
@@ -1022,7 +1054,7 @@ pub(crate) mod tests {
     #[test]
     fn construct_tree() {
         const EXP: usize = 1_000_000;
-        let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
+        let x: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Insert(get_test_entry(num))).collect();
 
         let now = Instant::now();
         let mut tree = TreeCache::new();
@@ -1036,8 +1068,6 @@ pub(crate) mod tests {
         );
 
         // Cost of second update
-        let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
-
         let now = Instant::now();
         // Reuse tree
         tree.update_with_elements(&x);
@@ -1052,8 +1082,6 @@ pub(crate) mod tests {
         // println!("{:?}", tree.cache);
 
         // Cost of second update
-        let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
-
         let now = Instant::now();
         // Reuse tree
         tree.update_with_elements(&x);
