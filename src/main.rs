@@ -1,5 +1,3 @@
-
-
 use rayon::prelude::*;
 
 use std::collections::HashMap;
@@ -14,7 +12,6 @@ use parking_lot::Mutex;
 pub mod auth_db;
 use auth_db::*;
 
-
 fn main() {
     rayon::ThreadPoolBuilder::new()
         .thread_name(|index| format!("rayon-global-{}", index))
@@ -22,7 +19,9 @@ fn main() {
         .expect("Failed to build rayon global thread pool.");
 
     const EXP: usize = 1_000_000;
-    let x: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Insert(get_test_entry(num))).collect();
+    let x: Vec<AuthOp> = (0..EXP)
+        .map(|num| AuthOp::Insert(get_test_entry(num)))
+        .collect();
 
     let now = Instant::now();
     let mut tree = TreeCache::new();
@@ -59,7 +58,6 @@ fn main() {
         dur.as_millis()
     );
 }
-
 
 #[cfg(test)]
 pub(crate) mod tests;

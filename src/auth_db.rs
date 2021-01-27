@@ -38,22 +38,27 @@ impl TreeWorkSet {
 struct ScratchPad {
     work_set: TreeWorkSet,
     returns: Vec<Box<AuthTreeInternalNode>>,
-    spare_elements: Vec<AuthElement>
+    spare_elements: Vec<AuthElement>,
 }
 
 impl ScratchPad {
     fn new() -> ScratchPad {
         ScratchPad {
-            work_set : TreeWorkSet::new(),
-            returns : Vec::new(),
-            spare_elements : Vec::new(),
+            work_set: TreeWorkSet::new(),
+            returns: Vec::new(),
+            spare_elements: Vec::new(),
         }
     }
 
-    fn split(self) -> (TreeWorkSet, Vec<Box<AuthTreeInternalNode>>, Vec<AuthElement>) {
+    fn split(
+        self,
+    ) -> (
+        TreeWorkSet,
+        Vec<Box<AuthTreeInternalNode>>,
+        Vec<AuthElement>,
+    ) {
         (self.work_set, self.returns, self.spare_elements)
     }
-
 }
 
 pub struct TreeCache {
@@ -125,7 +130,6 @@ impl TreeCache {
     }
 
     pub fn update_with_elements(&mut self, update_slice: &[AuthOp]) -> Vec<Pointer> {
-
         // First deal with the case there is no root. Then we just make an empty one.
         let root_pointer = if self.root.is_none() {
             let root = Box::new(AuthTreeInternalNode::empty(true, [MIN_KEY, MAX_KEY]));
@@ -140,84 +144,41 @@ impl TreeCache {
         // Make some temporary structures.
         let mut scratch = ScratchPad::new();
 
-        self.update_parallel_scratch(
-            0,
-            &mut scratch,
-            root_pointer,
-            update_slice,
-        );
+        self.update_parallel(0, &mut scratch, root_pointer, update_slice);
+        let root_template : AuthTreeInternalNode = AuthTreeInternalNode::empty(false, [MIN_KEY, MAX_KEY]);
 
-        let (mut work_set, mut returns, mut spare_elements) = scratch.split();
-
-        let removed = self.apply_workset(work_set);
         loop {
-
             // Now we reduce the number of returns by constructing the tree
-            let number_of_returns = returns.len();
+            let number_of_returns = scratch.returns.len();
 
-            if number_of_returns == 0 && spare_elements.len() == 0 {
-                // All elements were deleted, and none wait to be in a block.
+            // All elements were deleted, and none wait to be in a block.
+            // We are left with no tree, and set root to None.
+            if number_of_returns == 0 && scratch.spare_elements.len() == 0 {
                 self.root = None;
+                let removed = self.apply_workset(scratch.work_set);
                 return removed;
             }
 
-            // Save the new nodes in the cache, and add them to the list.
-            for mut ret in returns.drain(..) {
-                let new_pointer = self.next_pointer();
-                let mut new_element = AuthElement {
-                    key: ret.bounds[1],
-                    digest: [0; DIGEST_SIZE], // FIX (security): compute the hash here.
-                    pointer: new_pointer,
-                };
+            self.prepare_returns(0, &mut scratch);
 
-                ret.compute_hash(&mut new_element.digest);
-                spare_elements.push(new_element);
-                self.cache.insert(new_pointer, Mutex::new(ret));
-
-                if number_of_returns == 1 {
-                    // This is the new root, save and exit.
-                    self.root = Some(new_pointer);
-                    return removed;
-                }
+            // The unique return becomes the new root.
+            if number_of_returns == 1 {
+                self.root = Some(scratch.spare_elements.pop().unwrap().pointer);
+                let removed = self.apply_workset(scratch.work_set);
+                return removed;
             }
 
-            let new_root = AuthTreeInternalNode::empty(false, [MIN_KEY, MAX_KEY]);
-
-            new_root.split_update(
-                &mut returns,
-                spare_elements.len(),
-                &mut spare_elements[..].iter().peekable(),
+            // Add the new spare elements into a new root, and grow the tree.
+            root_template.split_update(
+                &mut scratch.returns,
+                scratch.spare_elements.len(),
+                &mut scratch.spare_elements[..].iter().peekable(),
             );
-            spare_elements.clear();
+            scratch.spare_elements.clear();
         }
     }
 
-    fn prepare_returns(&self,
-        intitial_returns : usize,
-        work_set: &mut TreeWorkSet,
-        returns: &mut Vec<Box<AuthTreeInternalNode>>,
-        spare_elements: &mut Vec<AuthElement>){
-
-        // Save the new nodes in the cache, and add them to the list.
-        for mut ret in returns.drain(intitial_returns..) {
-            let new_pointer = self.next_pointer();
-            let mut new_element = AuthElement {
-                key: ret.bounds[1],
-                digest: [0; DIGEST_SIZE],
-                pointer: new_pointer,
-            };
-
-            ret.compute_hash(&mut new_element.digest);
-            spare_elements.push(new_element);
-            work_set.cache.insert(new_pointer, Mutex::new(ret));
-        }
-
-    }
-
-    fn prepare_returns_scratch(&self,
-        intitial_returns : usize,
-        scratch : &mut ScratchPad){
-
+    fn prepare_returns(&self, intitial_returns: usize, scratch: &mut ScratchPad) {
         // Save the new nodes in the cache, and add them to the list.
         for mut ret in scratch.returns.drain(intitial_returns..) {
             let new_pointer = self.next_pointer();
@@ -231,135 +192,15 @@ impl TreeCache {
             scratch.spare_elements.push(new_element);
             scratch.work_set.cache.insert(new_pointer, Mutex::new(ret));
         }
-
     }
 
-    pub fn update_parallel(
+    fn update_parallel(
         &self,
         depth: usize,
-        work_set: &mut TreeWorkSet,
-        returns: &mut Vec<Box<AuthTreeInternalNode>>,
-        spare_elements: &mut Vec<AuthElement>,
+        scratch: &mut ScratchPad,
         pointer: Pointer,
-        given_elements: &[AuthOp],
+        operations: &[AuthOp],
     ) {
-
-        // println!("Wait for lock {}", pointer);
-        let node_guard = self.cache[&pointer].lock();
-        let this_node = &node_guard;
-        // println!("Got lock {}", pointer);
-        let intitial_returns = returns.len();
-        let intitial_spare_elements = spare_elements.len();
-
-        // Does not work for a leaf node -- revert to normal update.
-        if this_node.leaf {
-            drop(node_guard);
-            self.update_leaf(
-                depth,
-                work_set,
-                returns,
-                spare_elements,
-                pointer,
-                &mut given_elements.iter().peekable()
-            );
-            return
-        }
-
-        let this_node_len = this_node.elements;
-        let positions: Vec<_> = (0..this_node_len).into_iter().collect();
-
-        let computed: Vec<_> = positions
-            .par_iter()
-            .map(|i| {
-                let mut spare_elements: Vec<AuthElement> = Vec::new();
-                let mut returns: Vec<Box<AuthTreeInternalNode>> = Vec::new();
-                let mut work_set = TreeWorkSet::new();
-
-                let this_child_ref = this_node.get_by_position(*i);
-
-                // Compute the start position:
-                let start_position = if *i > 0 {
-                    let prev_child_ref = this_node.get_by_position(i - 1);
-                    given_elements[..]
-                        .binary_search_by_key(&prev_child_ref.key, |elem| *elem.key())
-                        .map(|x| x + 1)
-                        .unwrap_or_else(|x| x)
-                } else {
-                    0
-                };
-
-                // Compute the end position:
-                let end_position = given_elements[..]
-                    .binary_search_by_key(&this_child_ref.key, |elem| *elem.key())
-                    .map(|x| x + 1)
-                    .unwrap_or_else(|x| x);
-
-
-                if start_position == end_position {
-                    // We do not need to explore in this child, so we simply add the element to the spares list
-                    spare_elements.push(*this_child_ref); // FIX (perf): COPY HERE
-                    return (returns, spare_elements, work_set);
-                }
-
-                if depth == 0 && this_node_len < NODE_CAPACITY / 2 {
-                    // Allow for one more level of parallelism, in case the root is very small.
-                    self.update_parallel(
-                        depth + 1,
-                        &mut work_set,
-                        &mut returns,
-                        &mut spare_elements,
-                        this_child_ref.pointer,
-                        &given_elements[start_position..end_position],
-                    );
-                }
-                else {
-                    let mut iter = given_elements[start_position..end_position]
-                        .iter()
-                        .peekable();
-                    self.update(
-                        depth + 1,
-                        &mut work_set,
-                        &mut returns,
-                        &mut spare_elements,
-                        this_child_ref.pointer,
-                        &mut iter,
-                    );
-                }
-
-                self.prepare_returns(
-                    intitial_returns,
-                    &mut work_set,
-                    &mut returns,
-                    &mut spare_elements);
-
-                // Now get back the node we were considering
-                return (returns, spare_elements, work_set);
-            })
-            .collect();
-
-        for (rets, spares, wset) in computed.into_iter() {
-            returns.extend(rets);
-            spare_elements.extend(spares);
-            work_set.extend(wset);
-        }
-
-        this_node.split_update(
-            returns,
-            spare_elements.len() - intitial_spare_elements,
-            &mut spare_elements[intitial_spare_elements..].iter().peekable(),
-        );
-        spare_elements.truncate(intitial_spare_elements);
-        work_set.remove.push(pointer);
-    }
-
-    fn update_parallel_scratch(
-        &self,
-        depth: usize,
-        scratch : &mut ScratchPad,
-        pointer: Pointer,
-        given_elements: &[AuthOp],
-    ) {
-
         // println!("Wait for lock {}", pointer);
         let node_guard = self.cache[&pointer].lock();
         let this_node = &node_guard;
@@ -370,13 +211,8 @@ impl TreeCache {
         // Does not work for a leaf node -- revert to normal update.
         if this_node.leaf {
             drop(node_guard);
-            self.update_leaf_scratch(
-                depth,
-                scratch,
-                pointer,
-                &mut given_elements.iter().peekable()
-            );
-            return
+            self.update_leaf(depth, scratch, pointer, &mut operations.iter().peekable());
+            return;
         }
 
         let this_node_len = this_node.elements;
@@ -387,63 +223,32 @@ impl TreeCache {
             .map(|i| {
                 let mut scratch = ScratchPad::new();
 
+                // Slice the relevant operations
                 let this_child_ref = this_node.get_by_position(*i);
+                let ops = this_node.relevant_slice(*i, operations);
 
-                // Compute the start position:
-                let start_position = if *i > 0 {
-                    let prev_child_ref = this_node.get_by_position(i - 1);
-                    given_elements[..]
-                        .binary_search_by_key(&prev_child_ref.key, |elem| *elem.key())
-                        .map(|x| x + 1)
-                        .unwrap_or_else(|x| x)
-                } else {
-                    0
-                };
-
-                // Compute the end position:
-                let end_position = given_elements[..]
-                    .binary_search_by_key(&this_child_ref.key, |elem| *elem.key())
-                    .map(|x| x + 1)
-                    .unwrap_or_else(|x| x);
-
-
-                if start_position == end_position {
-                    // We do not need to explore in this child, so we simply add the element to the spares list
+                if ops.len() == 0 {
+                    // No relevant operations in this child. We do not need to explore in this child,
+                    // so we simply add the element to the spares list
                     scratch.spare_elements.push(*this_child_ref); // FIX (perf): COPY HERE
                     return scratch;
                 }
 
                 if depth == 0 && this_node_len < NODE_CAPACITY / 2 {
                     // Allow for one more level of parallelism, in case the root is very small.
-                    self.update_parallel_scratch(
-                        depth + 1,
-                        &mut scratch,
-                        this_child_ref.pointer,
-                        &given_elements[start_position..end_position],
-                    );
+                    self.update_parallel(depth + 1, &mut scratch, this_child_ref.pointer, &ops);
+                } else {
+                    let mut iter = ops.iter().peekable();
+                    self.update(depth + 1, &mut scratch, this_child_ref.pointer, &mut iter);
                 }
-                else {
-                    let mut iter = given_elements[start_position..end_position]
-                        .iter()
-                        .peekable();
-                    self.update_scratch(
-                        depth + 1,
-                        &mut scratch,
-                        this_child_ref.pointer,
-                        &mut iter,
-                    );
-                }
-
-                self.prepare_returns_scratch(
-                    intitial_returns,
-                    &mut scratch);
 
                 // Now get back the node we were considering
+                self.prepare_returns(intitial_returns, &mut scratch);
                 return scratch;
             })
             .collect();
 
-        for mut inner_scratch in computed.into_iter() {
+        for inner_scratch in computed.into_iter() {
             let (ws, ret, spare) = inner_scratch.split();
             scratch.returns.extend(ret);
             scratch.spare_elements.extend(spare);
@@ -453,60 +258,18 @@ impl TreeCache {
         this_node.split_update(
             &mut scratch.returns,
             scratch.spare_elements.len() - intitial_spare_elements,
-            &mut scratch.spare_elements[intitial_spare_elements..].iter().peekable(),
+            &mut scratch.spare_elements[intitial_spare_elements..]
+                .iter()
+                .peekable(),
         );
         scratch.spare_elements.truncate(intitial_spare_elements);
         scratch.work_set.remove.push(pointer);
     }
 
-    pub fn update_leaf<'x, T>(
+    fn update_leaf<'x, T>(
         &self,
-        depth: usize,
-        work_set: &mut TreeWorkSet,
-        returns: &mut Vec<Box<AuthTreeInternalNode>>,
-        spare_elements: &mut Vec<AuthElement>,
-        pointer: Pointer,
-        iter: &mut Peekable<T>,
-    ) where
-        T: Iterator<Item = &'x AuthOp>,
-    {
-        let mut node_guard = self.cache[&pointer].lock();
-        let this_node = &node_guard;
-        let returns_initial_length = returns.len();
-        let spare_initial_length = spare_elements.len();
-        this_node.merge_into_leaf(returns, spare_elements, iter);
-        assert!(spare_elements.len() == spare_initial_length);
-
-        // We special case updating leaves, since we have lots of them.
-        // If as a result of the update we only have a single leaf, then
-        // we re-write the given leaf in place. Otherwise we create new
-        // (many) blocks, re-balancing the items.
-        if returns.len() - returns_initial_length == 1 {
-            let mut single_block = returns.pop().unwrap(); // safe due to check
-            let mut updated_element = AuthElement {
-                key: single_block.bounds[1],
-                digest: [0; DIGEST_SIZE],
-                pointer: pointer,
-            };
-            single_block.compute_hash(&mut updated_element.digest);
-            spare_elements.push(updated_element);
-
-            // Update the block in-place:
-            let write_ref : &mut Box<AuthTreeInternalNode> = &mut node_guard;
-            single_block.updated = true;
-            *write_ref = single_block;
-        }
-        else
-        {
-            work_set.remove.push(pointer);
-        }
-        return;
-    }
-
-    fn update_leaf_scratch<'x, T>(
-        &self,
-        depth: usize,
-        scratch : &mut ScratchPad,
+        _depth: usize,
+        scratch: &mut ScratchPad,
         pointer: Pointer,
         iter: &mut Peekable<T>,
     ) where
@@ -534,92 +297,19 @@ impl TreeCache {
             scratch.spare_elements.push(updated_element);
 
             // Update the block in-place:
-            let write_ref : &mut Box<AuthTreeInternalNode> = &mut node_guard;
+            let write_ref: &mut Box<AuthTreeInternalNode> = &mut node_guard;
             single_block.updated = true;
             *write_ref = single_block;
-        }
-        else
-        {
+        } else {
             scratch.work_set.remove.push(pointer);
         }
         return;
     }
 
-    pub fn update<'x, T>(
+    fn update<'x, T>(
         &self,
         depth: usize,
-        work_set: &mut TreeWorkSet,
-        returns: &mut Vec<Box<AuthTreeInternalNode>>,
-        spare_elements: &mut Vec<AuthElement>,
-        pointer: Pointer,
-        iter: &mut Peekable<T>,
-    ) where
-        T: Iterator<Item = &'x AuthOp>,
-    {
-        let node_guard = self.cache[&pointer].lock();
-        let this_node = &node_guard;
-        let intitial_returns = returns.len();
-        let intitial_spare_elements = spare_elements.len();
-
-        if this_node.leaf {
-            // Drop the mutex to allow to re-enter
-            drop(node_guard);
-            self.update_leaf(
-                depth,
-                work_set,
-                returns,
-                spare_elements,
-                pointer,
-                iter
-            );
-            return
-        }
-
-        // This is an internal node
-        let this_node_len = this_node.elements;
-        for i in 0..this_node_len {
-            let this_child_ref = this_node.get_by_position(i);
-
-            let peek_next = iter.peek();
-
-            if peek_next.is_none() || !(peek_next.unwrap().key() <= &this_child_ref.key) {
-                // We do not need to explore in this child, so we simply add the element to the spares list
-                spare_elements.push(*this_child_ref); // FIX (perf): COPY HERE
-                continue;
-            }
-
-            // We need to explore down this child
-            let child_pointer = this_child_ref.pointer;
-
-            self.update(
-                depth + 1,
-                work_set,
-                returns,
-                spare_elements,
-                child_pointer,
-                iter,
-            );
-
-            self.prepare_returns(
-                intitial_returns,
-                work_set,
-                returns,
-                spare_elements);
-        }
-
-        this_node.split_update(
-            returns,
-            spare_elements.len() - intitial_spare_elements,
-            &mut spare_elements[intitial_spare_elements..].iter().peekable(),
-        );
-        spare_elements.truncate(intitial_spare_elements);
-        work_set.remove.push(pointer);
-    }
-
-    fn update_scratch<'x, T>(
-        &self,
-        depth: usize,
-        scratch : &mut ScratchPad,
+        scratch: &mut ScratchPad,
         pointer: Pointer,
         iter: &mut Peekable<T>,
     ) where
@@ -633,21 +323,15 @@ impl TreeCache {
         if this_node.leaf {
             // Drop the mutex to allow to re-enter
             drop(node_guard);
-            self.update_leaf_scratch(
-                depth,
-                scratch,
-                pointer,
-                iter
-            );
-            return
+            self.update_leaf(depth, scratch, pointer, iter);
+            return;
         }
 
         // This is an internal node
         let this_node_len = this_node.elements;
         for i in 0..this_node_len {
-            let this_child_ref = this_node.get_by_position(i);
-
             let peek_next = iter.peek();
+            let this_child_ref = this_node.get_by_position(i);
 
             if peek_next.is_none() || !(peek_next.unwrap().key() <= &this_child_ref.key) {
                 // We do not need to explore in this child, so we simply add the element to the spares list
@@ -656,24 +340,16 @@ impl TreeCache {
             }
 
             // We need to explore down this child
-            let child_pointer = this_child_ref.pointer;
-
-            self.update_scratch(
-                depth + 1,
-                scratch,
-                child_pointer,
-                iter,
-            );
-
-            self.prepare_returns_scratch(
-                intitial_returns,
-                scratch);
+            self.update(depth + 1, scratch, this_child_ref.pointer, iter);
+            self.prepare_returns(intitial_returns, scratch);
         }
 
         this_node.split_update(
             &mut scratch.returns,
             scratch.spare_elements.len() - intitial_spare_elements,
-            &mut scratch.spare_elements[intitial_spare_elements..].iter().peekable(),
+            &mut scratch.spare_elements[intitial_spare_elements..]
+                .iter()
+                .peekable(),
         );
         scratch.spare_elements.truncate(intitial_spare_elements);
         scratch.work_set.remove.push(pointer);
@@ -737,21 +413,18 @@ pub enum GetPointer {
 
 #[derive(Clone)]
 pub struct AuthTreeInternalNode {
-    pub updated : bool,
-    pub leaf: bool,                 // true if this is a leaf node
-    pub elements: usize,            // number of elements in the node
-    pub bounds: [AKey; 2],          // the min and max key (inclusive)
-    pub items: [AuthElement; NODE_CAPACITY]
+    pub updated: bool,
+    pub leaf: bool,        // true if this is a leaf node
+    pub elements: usize,   // number of elements in the node
+    pub bounds: [AKey; 2], // the min and max key (inclusive)
+    pub items: [AuthElement; NODE_CAPACITY],
 }
 
 impl AuthTreeInternalNode {
-    pub fn empty(
-        leaf: bool,
-        bounds: [AKey; 2],
-    ) -> AuthTreeInternalNode {
+    pub fn empty(leaf: bool, bounds: [AKey; 2]) -> AuthTreeInternalNode {
         // Initialize memory
         let new_node = AuthTreeInternalNode {
-            updated : false,
+            updated: false,
             leaf,
             elements: 0,
             bounds,
@@ -770,7 +443,6 @@ impl AuthTreeInternalNode {
     where
         T: Iterator<Item = &'x AuthElement>,
     {
-
         if capacity > NODE_CAPACITY {
             panic!(
                 "Requested capacity must not exceed node capacity: {:?}",
@@ -861,7 +533,7 @@ impl AuthTreeInternalNode {
     }
 
     pub fn push_sorted(&mut self, new_element: &AuthElement) {
-        if self.is_full(){
+        if self.is_full() {
             panic!("Node is already full.");
         }
         self.items[self.elements] = *new_element;
@@ -885,7 +557,6 @@ impl AuthTreeInternalNode {
         let mut position = 0; // The position we are in this block.
         let initial_spare_elements = spare_elements.len();
 
-
         let mut iter = iter.into_iter().peekable();
         loop {
             let peek_element = iter.peek();
@@ -901,7 +572,8 @@ impl AuthTreeInternalNode {
 
             // If iterator is finished OR next iterator key is larger than self key
             if !self_list_finished
-                && (iter_finished || &self.get_by_position(position).key < peek_element.unwrap().key())
+                && (iter_finished
+                    || &self.get_by_position(position).key < peek_element.unwrap().key())
             {
                 spare_elements.push(*self.get_by_position(position));
                 position += 1;
@@ -915,7 +587,7 @@ impl AuthTreeInternalNode {
                 || new_element.key() < &self.get_by_position(position).key
             {
                 // The iterator element takes priority.
-                if let AuthOp::Insert(elem) = new_element{
+                if let AuthOp::Insert(elem) = new_element {
                     spare_elements.push(*elem);
                 }
                 // Simply ignore they keys to be deleted if not in DB
@@ -924,7 +596,7 @@ impl AuthTreeInternalNode {
 
             if new_element.key() == &self.get_by_position(position).key {
                 // The new element takes priority AND we drop the self element (replace)
-                if let AuthOp::Insert(elem) = new_element{
+                if let AuthOp::Insert(elem) = new_element {
                     spare_elements.push(*elem);
                 }
                 // Skip to delete
@@ -941,12 +613,16 @@ impl AuthTreeInternalNode {
         spare_elements.truncate(initial_spare_elements);
     }
 
-    pub fn split_update<'x, T>(&self, returns: &mut Vec<Box<Self>>, size: usize, xref: &mut Peekable<T>)
-    where
+    pub fn split_update<'x, T>(
+        &self,
+        returns: &mut Vec<Box<Self>>,
+        size: usize,
+        xref: &mut Peekable<T>,
+    ) where
         T: Iterator<Item = &'x AuthElement>,
     {
         if size == 0 {
-            return
+            return;
         }
 
         // Compute the averageoccupancy of a block:
@@ -971,12 +647,8 @@ impl AuthTreeInternalNode {
             }
 
             // Create the entry
-            let entry = AuthTreeInternalNode::new(
-                self.leaf,
-                [min_key, self.bounds[1]],
-                xref,
-                occupancy,
-            );
+            let entry =
+                AuthTreeInternalNode::new(self.leaf, [min_key, self.bounds[1]], xref, occupancy);
 
             if entry.leaf {
                 min_key = entry.bounds[1];
@@ -984,6 +656,27 @@ impl AuthTreeInternalNode {
 
             returns.push(Box::new(entry));
         }
+    }
+
+    pub fn relevant_slice<'a>(&self, position: usize, operations: &'a [AuthOp]) -> &'a [AuthOp] {
+        let this_child_ref = self.get_by_position(position);
+        let start_position = if position > 0 {
+            let prev_child_ref = self.get_by_position(position - 1);
+            operations[..]
+                .binary_search_by_key(&prev_child_ref.key, |elem| *elem.key())
+                .map(|x| x + 1)
+                .unwrap_or_else(|x| x)
+        } else {
+            0
+        };
+
+        // Compute the end position:
+        let end_position = operations[..]
+            .binary_search_by_key(&this_child_ref.key, |elem| *elem.key())
+            .map(|x| x + 1)
+            .unwrap_or_else(|x| x);
+
+        &operations[start_position..end_position]
     }
 
     pub fn is_full(&self) -> bool {
@@ -1018,7 +711,6 @@ impl fmt::Debug for AuthTreeInternalNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut fx = if self.leaf {
             f.debug_struct("Leaf")
-
         } else {
             f.debug_struct("Branch")
         };

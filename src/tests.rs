@@ -62,20 +62,21 @@ fn construct_two_leaf_with_max() {
         &mut x.iter().peekable(),
         NODE_CAPACITY / 2,
     );
-
 }
 
 #[test]
 fn construct_leaf_with_merge_simple() {
-    let x: Vec<AuthElement> = (0..NODE_CAPACITY*10).map(|num| get_test_entry(num)).collect();
+    let x: Vec<AuthElement> = (0..NODE_CAPACITY * 10)
+        .map(|num| get_test_entry(num))
+        .collect();
     let mut iter = x.iter().peekable();
-    let mut entry =
-        AuthTreeInternalNode::new(true, [MIN_KEY, MAX_KEY], &mut iter, NODE_CAPACITY);
+    let mut entry = AuthTreeInternalNode::new(true, [MIN_KEY, MAX_KEY], &mut iter, NODE_CAPACITY);
 
     entry.bounds = [MIN_KEY, MAX_KEY];
 
-
-    let x: Vec<AuthOp> = (NODE_CAPACITY..NODE_CAPACITY*10).map(|num| AuthOp::Insert(get_test_entry(num))).collect();
+    let x: Vec<AuthOp> = (NODE_CAPACITY..NODE_CAPACITY * 10)
+        .map(|num| AuthOp::Insert(get_test_entry(num)))
+        .collect();
     let mut iter = x.iter().peekable();
 
     let mut returns = Vec::new();
@@ -89,7 +90,9 @@ fn construct_leaf_with_merge_simple() {
 
 #[test]
 fn construct_leaf_with_merge_empty_start() {
-    let x: Vec<AuthOp> = (0..100).map(|num| AuthOp::Insert(get_test_entry(num))).collect();
+    let x: Vec<AuthOp> = (0..100)
+        .map(|num| AuthOp::Insert(get_test_entry(num)))
+        .collect();
     let mut iter = x.iter().peekable();
 
     let mut entry = AuthTreeInternalNode::empty(true, [MIN_KEY, MAX_KEY]);
@@ -108,7 +111,9 @@ fn construct_leaf_with_merge_empty_start() {
 #[test]
 fn test_walk() {
     const EXP: usize = 20;
-    let found: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Insert(get_test_entry(num))).collect();
+    let found: Vec<AuthOp> = (0..EXP)
+        .map(|num| AuthOp::Insert(get_test_entry(num)))
+        .collect();
 
     // Build tree
     let mut tree = TreeCache::new();
@@ -147,8 +152,12 @@ fn test_walk() {
 #[test]
 fn test_delete() {
     const EXP: usize = 1_000;
-    let found: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Insert(get_test_entry(num))).collect();
-    let delete: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Delete(get_test_entry(2 * num + 1).key)).collect();
+    let found: Vec<AuthOp> = (0..EXP)
+        .map(|num| AuthOp::Insert(get_test_entry(num)))
+        .collect();
+    let delete: Vec<AuthOp> = (0..EXP)
+        .map(|num| AuthOp::Delete(get_test_entry(2 * num + 1).key))
+        .collect();
 
     // Build tree
     let mut tree = TreeCache::new();
@@ -167,25 +176,30 @@ fn test_delete() {
     // Check all are in
     for (i, key_exists) in found.iter().enumerate() {
         match tree.get(&key_exists.key(), &mut None) {
-            GetPointer::Found(_x) => assert!( i % 2 == 0),
-            GetPointer::NotFound => assert!( i % 2 == 1),
+            GetPointer::Found(_x) => assert!(i % 2 == 0),
+            GetPointer::NotFound => assert!(i % 2 == 1),
             _ => panic!("Should find / not find the key."),
         }
     }
 
-    let delete_all: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Delete(get_test_entry(num).key)).collect();
+    let delete_all: Vec<AuthOp> = (0..EXP)
+        .map(|num| AuthOp::Delete(get_test_entry(num).key))
+        .collect();
     tree.update_with_elements(&delete_all);
 
     // All blocks were deleted
     assert!(tree.cache.len() == 0);
-
 }
 
 #[test]
 fn test_gets() {
     const EXP: usize = 1_000;
-    let found: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Insert(get_test_entry(2 * num))).collect();
-    let notfound: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Insert(get_test_entry(2 * num + 1))).collect();
+    let found: Vec<AuthOp> = (0..EXP)
+        .map(|num| AuthOp::Insert(get_test_entry(2 * num)))
+        .collect();
+    let notfound: Vec<AuthOp> = (0..EXP)
+        .map(|num| AuthOp::Insert(get_test_entry(2 * num + 1)))
+        .collect();
 
     // Build tree
     let mut tree = TreeCache::new();
@@ -235,7 +249,9 @@ fn test_gets() {
 #[test]
 fn construct_tree() {
     const EXP: usize = 1_000_000;
-    let x: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Insert(get_test_entry(num))).collect();
+    let x: Vec<AuthOp> = (0..EXP)
+        .map(|num| AuthOp::Insert(get_test_entry(num)))
+        .collect();
 
     let now = Instant::now();
     let mut tree = TreeCache::new();
