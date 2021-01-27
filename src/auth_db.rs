@@ -214,18 +214,16 @@ impl TreeCache {
 
         // Does not work for a leaf node -- revert to normal update.
         if this_node.leaf {
-            let mut iter = given_elements.iter().peekable();
-            // We must drop the lock to allow update to re-enter.
             drop(node_guard);
-            self.update(
-                depth + 1,
+            self.update_leaf(
+                depth,
                 work_set,
                 returns,
                 spare_elements,
                 pointer,
-                &mut iter,
+                &mut given_elements.iter().peekable()
             );
-            return;
+            return
         }
 
         let this_node_len = this_node.elements;
@@ -264,9 +262,6 @@ impl TreeCache {
                     return (returns, spare_elements, work_set);
                 }
 
-                // We need to explore down this child
-                let child_pointer = this_child_ref.pointer;
-
                 if depth == 0 && this_node_len < NODE_CAPACITY / 2 {
                     // Allow for one more level of parallelism, in case the root is very small.
                     self.update_parallel(
@@ -274,7 +269,7 @@ impl TreeCache {
                         &mut work_set,
                         &mut returns,
                         &mut spare_elements,
-                        child_pointer,
+                        this_child_ref.pointer,
                         &given_elements[start_position..end_position],
                     );
                 }
@@ -282,13 +277,12 @@ impl TreeCache {
                     let mut iter = given_elements[start_position..end_position]
                         .iter()
                         .peekable();
-                    drop(this_node);
                     self.update(
                         depth + 1,
                         &mut work_set,
                         &mut returns,
                         &mut spare_elements,
-                        child_pointer,
+                        this_child_ref.pointer,
                         &mut iter,
                     );
                 }
@@ -319,7 +313,7 @@ impl TreeCache {
         work_set.remove.push(pointer);
     }
 
-    pub fn update<'x, T>(
+    pub fn update_leaf<'x, T>(
         &self,
         depth: usize,
         work_set: &mut TreeWorkSet,
@@ -332,39 +326,65 @@ impl TreeCache {
     {
         let mut node_guard = self.cache[&pointer].lock();
         let this_node = &node_guard;
+        let returns_initial_length = returns.len();
+        let spare_initial_length = spare_elements.len();
+        this_node.merge_into_leaf(returns, spare_elements, iter);
+        assert!(spare_elements.len() == spare_initial_length);
+
+        // We special case updating leaves, since we have lots of them.
+        // If as a result of the update we only have a single leaf, then
+        // we re-write the given leaf in place. Otherwise we create new
+        // (many) blocks, re-balancing the items.
+        if returns.len() - returns_initial_length == 1 {
+            let mut single_block = returns.pop().unwrap(); // safe due to check
+            let mut updated_element = AuthElement {
+                key: single_block.bounds[1],
+                digest: [0; DIGEST_SIZE],
+                pointer: pointer,
+            };
+            single_block.compute_hash(&mut updated_element.digest);
+            spare_elements.push(updated_element);
+
+            // Update the block in-place:
+            let write_ref : &mut Box<AuthTreeInternalNode> = &mut node_guard;
+            single_block.updated = true;
+            *write_ref = single_block;
+        }
+        else
+        {
+            work_set.remove.push(pointer);
+        }
+        return;
+    }
+
+    pub fn update<'x, T>(
+        &self,
+        depth: usize,
+        work_set: &mut TreeWorkSet,
+        returns: &mut Vec<Box<AuthTreeInternalNode>>,
+        spare_elements: &mut Vec<AuthElement>,
+        pointer: Pointer,
+        iter: &mut Peekable<T>,
+    ) where
+        T: Iterator<Item = &'x AuthOp>,
+    {
+        let node_guard = self.cache[&pointer].lock();
+        let this_node = &node_guard;
         let intitial_returns = returns.len();
         let intitial_spare_elements = spare_elements.len();
 
         if this_node.leaf {
-            let returns_initial_length = returns.len();
-            let spare_initial_length = spare_elements.len();
-            this_node.merge_into_leaf(returns, spare_elements, iter);
-            assert!(spare_elements.len() == spare_initial_length);
-
-            // We special case updating leaves, since we have lots of them.
-            // If as a result of the update we only have a single leaf, then
-            // we re-write the given leaf in place. Otherwise we create new
-            // (many) blocks, re-balancing the items.
-            if returns.len() - returns_initial_length == 1 {
-                let mut single_block = returns.pop().unwrap(); // safe due to check
-                let mut updated_element = AuthElement {
-                    key: single_block.bounds[1],
-                    digest: [0; DIGEST_SIZE],
-                    pointer: pointer,
-                };
-                single_block.compute_hash(&mut updated_element.digest);
-                spare_elements.push(updated_element);
-
-                // Update the block in-place:
-                let write_ref : &mut Box<AuthTreeInternalNode> = &mut node_guard;
-                single_block.updated = true;
-                *write_ref = single_block;
-            }
-            else
-            {
-                work_set.remove.push(pointer);
-            }
-            return;
+            // Drop the mutex to allow to re-enter
+            drop(node_guard);
+            self.update_leaf(
+                depth,
+                work_set,
+                returns,
+                spare_elements,
+                pointer,
+                iter
+            );
+            return
         }
 
         // This is an internal node
@@ -606,14 +626,16 @@ impl AuthTreeInternalNode {
         &self,
         returns: &mut Vec<Box<Self>>,
         spare_elements: &mut Vec<AuthElement>,
-        iter: &mut Peekable<T>,
+        iter: T,
     ) where
-        T: Iterator<Item = &'x AuthOp>,
+        T: IntoIterator<Item = &'x AuthOp>,
     {
         // Inefficient, but correct to start with:
         let mut position = 0; // The position we are in this block.
         let initial_spare_elements = spare_elements.len();
 
+
+        let mut iter = iter.into_iter().peekable();
         loop {
             let peek_element = iter.peek();
 
