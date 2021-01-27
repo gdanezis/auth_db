@@ -118,13 +118,17 @@ impl TreeCache {
         current_pointer
     }
 
-    fn get(&self, key: &AKey) -> GetPointer {
+    fn get(&self, key: &AKey, pointers: &mut Option<Vec<Pointer>>) -> GetPointer {
         if self.root.is_none() {
             return GetPointer::NotFound;
         }
 
         let mut next_pointer = self.root.unwrap();
         loop {
+            if let Some(ptrs) = pointers {
+                ptrs.push(next_pointer);
+            }
+
             let next_node = &self.cache[&next_pointer].lock();
             match next_node.get(key) {
                 GetPointer::Goto(p) => {
@@ -1021,7 +1025,7 @@ pub(crate) mod tests {
 
         // Check all are in
         for key_exists in &found {
-            match tree.get(&key_exists.key()) {
+            match tree.get(&key_exists.key(), &mut None) {
                 GetPointer::Found(x) => assert!(x == key_exists.unwrap_insert().pointer),
                 _ => panic!("Should find the key."),
             }
@@ -1031,7 +1035,7 @@ pub(crate) mod tests {
 
         // Check all are in
         for (i, key_exists) in found.iter().enumerate() {
-            match tree.get(&key_exists.key()) {
+            match tree.get(&key_exists.key(), &mut None) {
                 GetPointer::Found(x) => assert!( i % 2 == 0),
                 GetPointer::NotFound => assert!( i % 2 == 1),
                 _ => panic!("Should find / not find the key."),
@@ -1059,17 +1063,17 @@ pub(crate) mod tests {
         // Ensure all elements are there
         assert!(tree.walk().len() == 1000);
 
-        tree.get(&get_test_entry(390).key);
+        tree.get(&get_test_entry(390).key, &mut None);
 
         for key_exists in &found {
-            match tree.get(&key_exists.key()) {
+            match tree.get(&key_exists.key(), &mut None) {
                 GetPointer::Found(x) => assert!(x == key_exists.unwrap_insert().pointer),
                 _ => panic!("Should find the key."),
             }
         }
 
         for key_not_exists in &notfound {
-            match tree.get(&key_not_exists.key()) {
+            match tree.get(&key_not_exists.key(), &mut None) {
                 GetPointer::NotFound => {}
                 _ => panic!("Should NOT find the key."),
             }
@@ -1085,14 +1089,14 @@ pub(crate) mod tests {
         assert!(tree.walk().len() == 1000);
 
         for key_exists in &found {
-            match tree.get(&key_exists.key()) {
+            match tree.get(&key_exists.key(), &mut None) {
                 GetPointer::Found(x) => assert!(x == key_exists.unwrap_insert().pointer),
                 _ => panic!("Should find the key."),
             }
         }
 
         for key_not_exists in &notfound {
-            match tree.get(&key_not_exists.key()) {
+            match tree.get(&key_not_exists.key(), &mut None) {
                 GetPointer::NotFound => {}
                 _ => panic!("Should NOT find the key."),
             }
