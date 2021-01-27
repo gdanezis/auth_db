@@ -799,7 +799,6 @@ pub(crate) mod tests {
         let entry = AuthTreeInternalNode::new(
             true,
             [MIN_KEY, MAX_KEY],
-            None,
             &mut x.iter().peekable(),
             NODE_CAPACITY,
         );
@@ -818,7 +817,6 @@ pub(crate) mod tests {
         let entry = AuthTreeInternalNode::new(
             true,
             [MIN_KEY, get_test_entry(NODE_CAPACITY / 2).key],
-            None,
             &mut x.iter().peekable(),
             NODE_CAPACITY,
         );
@@ -835,7 +833,6 @@ pub(crate) mod tests {
         let entry = AuthTreeInternalNode::new(
             true,
             [MIN_KEY, MAX_KEY],
-            None,
             &mut x.iter().peekable(),
             NODE_CAPACITY / 2,
         );
@@ -845,7 +842,6 @@ pub(crate) mod tests {
         let entry = AuthTreeInternalNode::new(
             true,
             [MIN_KEY, MAX_KEY],
-            None,
             &mut x.iter().peekable(),
             NODE_CAPACITY / 2,
         );
@@ -858,7 +854,7 @@ pub(crate) mod tests {
         let x: Vec<AuthElement> = (0..100).map(|num| get_test_entry(num)).collect();
         let mut iter = x.iter().peekable();
         let mut entry =
-            AuthTreeInternalNode::new(true, [MIN_KEY, MAX_KEY], None, &mut iter, NODE_CAPACITY);
+            AuthTreeInternalNode::new(true, [MIN_KEY, MAX_KEY], &mut iter, NODE_CAPACITY);
 
         entry.bounds = [MIN_KEY, MAX_KEY];
 
@@ -876,7 +872,7 @@ pub(crate) mod tests {
         let x: Vec<AuthElement> = (0..100).map(|num| get_test_entry(num)).collect();
         let mut iter = x.iter().peekable();
 
-        let mut entry = AuthTreeInternalNode::empty(true, [MIN_KEY, MAX_KEY], None);
+        let mut entry = AuthTreeInternalNode::empty(true, [MIN_KEY, MAX_KEY]);
 
         entry.bounds = [MIN_KEY, MAX_KEY];
 
@@ -1034,65 +1030,4 @@ pub(crate) mod tests {
         // println!("TREE({}) {:?}", tree.cache.len(), tree.cache);
         // assert!(returns.len() == 1 + 100 / (NODE_CAPACITY));
     }
-
-    /*
-    #[test]
-    fn insert_contains_not_contains() {
-
-        const EXP : u64 = 100_000;
-        let mut tree = TreeCache::new();
-
-        let now = Instant::now();
-        let mut vec: Vec<AuthTreeEntry> = (0..EXP).map(|num| AuthTreeEntry::get_test_entry(2*num)).collect();
-        println!("Hash Alloc: {}ns\ttotal: {}ms", now.elapsed().as_nanos() / EXP as u128, now.elapsed().as_millis());
-
-        let vec_sorted = vec.clone();
-        vec.shuffle(&mut thread_rng());
-
-        let vec1 = vec.clone();
-        let now = Instant::now();
-        for entry in vec1 {
-            tree.insert(entry);
-        }
-        println!("Insert New:  {}ns\ttotal: {}ms", now.elapsed().as_nanos() / EXP as u128, now.elapsed().as_millis());
-
-        vec.shuffle(&mut thread_rng());
-        // println!("Nuber of blocks: {}", tree.cache.len());
-        let vec2 = vec.clone();
-        let now = Instant::now();
-        for entry in vec2 {
-            tree.insert(entry);
-        }
-        println!("Update Old: {}ns\ttotal: {}ms", now.elapsed().as_nanos() / EXP as u128, now.elapsed().as_millis());
-
-        let now = Instant::now();
-        tree.insert_sorted(vec_sorted);
-        println!("Update Sort: {}ns\ttotal: {}ms", now.elapsed().as_nanos() / EXP as u128, now.elapsed().as_millis());
-
-        let now = Instant::now();
-        // println!("Nuber of blocks: {}", tree.cache.len());
-        for num in 0..EXP {
-            let res = tree.get(&[2*num; 4]);
-            assert!(res.unwrap().key[0] == 2*num);
-        }
-        println!("Get Some:   {}ns\ttotal: {}ms", now.elapsed().as_nanos() / EXP as u128, now.elapsed().as_millis());
-
-        let now = Instant::now();
-        //println!("Nuber of blocks: {}", tree.cache.len());
-        for num in 0..EXP {
-            let res = tree.get(&[2*num + 1; 4]);
-            assert!(res.is_none());
-        }
-        println!("Get None:   {}ns\ttotal: {}ms", now.elapsed().as_nanos() / EXP as u128, now.elapsed().as_millis());
-
-        let now = Instant::now();
-        println!("Nuber of blocks: {}", tree.cache.len());
-        const NUM : usize = 10;
-        for num in 0..NUM {
-            tree.update_hashes();
-        }
-        println!("Update hashes: {}ms\ttotal: {}ms", now.elapsed().as_millis() / NUM as u128, now.elapsed().as_millis());
-
-    }
-    */
 }
