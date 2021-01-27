@@ -35,6 +35,27 @@ impl TreeWorkSet {
     }
 }
 
+struct ScratchPad {
+    work_set: TreeWorkSet,
+    returns: Vec<Box<AuthTreeInternalNode>>,
+    spare_elements: Vec<AuthElement>
+}
+
+impl ScratchPad {
+    fn new() -> ScratchPad {
+        ScratchPad {
+            work_set : TreeWorkSet::new(),
+            returns : Vec::new(),
+            spare_elements : Vec::new(),
+        }
+    }
+
+    fn split(self) -> (TreeWorkSet, Vec<Box<AuthTreeInternalNode>>, Vec<AuthElement>) {
+        (self.work_set, self.returns, self.spare_elements)
+    }
+
+}
+
 pub struct TreeCache {
     pub root: Option<usize>,
     pub cache: HashMap<usize, Mutex<Box<AuthTreeInternalNode>>>,
