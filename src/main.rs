@@ -12,7 +12,7 @@ fn main() {
         .build_global()
         .expect("Failed to build rayon global thread pool.");
 
-    const EXP: usize = 1_000_000;
+    const EXP: usize = 5_000_000;
     let x: Vec<AuthElement> = (0..EXP).map(|num| get_test_entry(num)).collect();
 
     let now = Instant::now();
@@ -286,20 +286,34 @@ impl TreeCache {
                     return (returns, spare_elements, work_set);
                 }
 
-                let mut iter = given_elements[start_position..end_position]
-                    .iter()
-                    .peekable();
                 // We need to explore down this child
                 let child_pointer = this_child_ref.pointer;
-                drop(this_node);
-                self.update(
-                    depth + 1,
-                    &mut work_set,
-                    &mut returns,
-                    &mut spare_elements,
-                    child_pointer,
-                    &mut iter,
-                );
+
+                if depth == 0 && this_node_len < NODE_CAPACITY / 2 {
+                    // Allow for one more level of parallelism, in case the root is very small.
+                    self.update_parallel(
+                        depth + 1,
+                        &mut work_set,
+                        &mut returns,
+                        &mut spare_elements,
+                        child_pointer,
+                        &given_elements[start_position..end_position],
+                    );
+                }
+                else {
+                    let mut iter = given_elements[start_position..end_position]
+                        .iter()
+                        .peekable();
+                    drop(this_node);
+                    self.update(
+                        depth + 1,
+                        &mut work_set,
+                        &mut returns,
+                        &mut spare_elements,
+                        child_pointer,
+                        &mut iter,
+                    );
+                }
 
                 // Save the new nodes in the cache, and add them to the list.
                 for mut ret in returns.drain(intitial_returns..) {
