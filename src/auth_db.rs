@@ -52,14 +52,11 @@ impl TreeCache {
         }
     }
 
-    pub fn clear_updated_pointers(&mut self) -> Vec<Pointer> {
-        let mut updated = Vec::new();
-        for (k, v) in &mut self.cache {
+    pub fn clear_updated_pointers(&mut self) {
+        for (_k, v) in &mut self.cache {
             v.lock().updated = false;
         }
-        updated
     }
-
 
     pub fn get_updated_pointers(&mut self) -> Vec<Pointer> {
         let mut updated = Vec::new();
@@ -107,9 +104,7 @@ impl TreeCache {
     }
 
     pub fn update_with_elements(&mut self, update_slice: &[AuthOp]) -> Vec<Pointer> {
-        let num_elements = update_slice.len();
 
-        let now = Instant::now();
         // First deal with the case there is no root. Then we just make an empty one.
         let root_pointer = if self.root.is_none() {
             let root = Box::new(AuthTreeInternalNode::empty(true, [MIN_KEY, MAX_KEY]));
@@ -120,14 +115,7 @@ impl TreeCache {
         } else {
             self.root.unwrap()
         };
-        let dur = now.elapsed();
-        println!(
-            "Root Pointer. {}ns\ttotal: {}ms",
-            dur.as_nanos() / num_elements as u128,
-            dur.as_millis()
-        );
 
-        let now = Instant::now();
         // Make some temporary structures.
         let mut returns = Vec::with_capacity(NODE_CAPACITY);
         let mut spare_elements = Vec::with_capacity(NODE_CAPACITY);
@@ -142,16 +130,6 @@ impl TreeCache {
             update_slice,
         );
 
-        let dur = now.elapsed();
-        println!(
-            "Child Update. {}ns\ttotal: {}ms",
-            dur.as_nanos() / num_elements as u128,
-            dur.as_millis()
-        );
-
-        println!("Node additions: {} Removals: {}", work_set.cache.len(), work_set.remove.len());
-
-        let now = Instant::now();
         let removed = self.apply_workset(work_set);
         loop {
 
@@ -180,13 +158,6 @@ impl TreeCache {
                 if number_of_returns == 1 {
                     // This is the new root, save and exit.
                     self.root = Some(new_pointer);
-
-                    let dur = now.elapsed();
-                    println!(
-                        "Make Root. {}ns\ttotal: {}ms",
-                        dur.as_nanos() / num_elements as u128,
-                        dur.as_millis()
-                    );
                     return removed;
                 }
             }
@@ -200,6 +171,28 @@ impl TreeCache {
             );
             spare_elements.clear();
         }
+    }
+
+    fn prepare_returns(&self,
+        intitial_returns : usize,
+        work_set: &mut TreeWorkSet,
+        returns: &mut Vec<Box<AuthTreeInternalNode>>,
+        spare_elements: &mut Vec<AuthElement>){
+
+        // Save the new nodes in the cache, and add them to the list.
+        for mut ret in returns.drain(intitial_returns..) {
+            let new_pointer = self.next_pointer();
+            let mut new_element = AuthElement {
+                key: ret.bounds[1],
+                digest: [0; DIGEST_SIZE],
+                pointer: new_pointer,
+            };
+
+            ret.compute_hash(&mut new_element.digest);
+            spare_elements.push(new_element);
+            work_set.cache.insert(new_pointer, Mutex::new(ret));
+        }
+
     }
 
     pub fn update_parallel(
@@ -300,19 +293,11 @@ impl TreeCache {
                     );
                 }
 
-                // Save the new nodes in the cache, and add them to the list.
-                for mut ret in returns.drain(intitial_returns..) {
-                    let new_pointer = self.next_pointer();
-                    let mut new_element = AuthElement {
-                        key: ret.bounds[1],
-                        digest: [0; DIGEST_SIZE],
-                        pointer: new_pointer,
-                    };
-
-                    ret.compute_hash(&mut new_element.digest);
-                    spare_elements.push(new_element);
-                    work_set.cache.insert(new_pointer, Mutex::new(ret));
-                }
+                self.prepare_returns(
+                    intitial_returns,
+                    &mut work_set,
+                    &mut returns,
+                    &mut spare_elements);
 
                 // Now get back the node we were considering
                 return (returns, spare_elements, work_set);
@@ -407,19 +392,11 @@ impl TreeCache {
                 iter,
             );
 
-            // Save the new nodes in the cache, and add them to the list.
-            for mut ret in returns.drain(intitial_returns..) {
-                let new_pointer = self.next_pointer();
-                let mut new_element = AuthElement {
-                    key: ret.bounds[1],
-                    digest: [0; DIGEST_SIZE],
-                    pointer: new_pointer,
-                };
-
-                ret.compute_hash(&mut new_element.digest);
-                spare_elements.push(new_element);
-                work_set.cache.insert(new_pointer, Mutex::new(ret));
-            }
+            self.prepare_returns(
+                intitial_returns,
+                work_set,
+                returns,
+                spare_elements);
         }
 
         this_node.split_update(
@@ -438,10 +415,6 @@ impl TreeCache {
     }
 
     fn _walk(&self, pointer: Pointer, result: &mut Vec<AuthElement>) {
-        if !self.cache.contains_key(&pointer) {
-            println!("Missing key: {}", pointer);
-        }
-
         let node = &self.cache[&pointer].lock();
         if node.leaf {
             for i in 0..node.elements {
@@ -604,7 +577,6 @@ impl AuthTreeInternalNode {
                     return GetPointer::NotFound;
                 }
             }
-
             return GetPointer::NotFound;
         } else {
             for i in 0..self.elements {
@@ -618,7 +590,9 @@ impl AuthTreeInternalNode {
     }
 
     pub fn push_sorted(&mut self, new_element: &AuthElement) {
-        assert!(self.elements < NODE_CAPACITY);
+        if self.is_full(){
+            panic!("Node is already full.");
+        }
         self.items[self.elements] = *new_element;
         self.elements += 1;
     }

@@ -56,14 +56,13 @@ fn construct_two_leaf_with_max() {
 
     assert!(entry.elements == NODE_CAPACITY / 2);
 
-    let entry = AuthTreeInternalNode::new(
+    let _entry = AuthTreeInternalNode::new(
         true,
         [MIN_KEY, MAX_KEY],
         &mut x.iter().peekable(),
         NODE_CAPACITY / 2,
     );
 
-    // assert!(entry.bounds[1] == get_test_entry(NODE_CAPACITY + NODE_CAPACITY / 2).key);
 }
 
 #[test]
@@ -111,8 +110,6 @@ fn test_walk() {
     const EXP: usize = 20;
     let found: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Insert(get_test_entry(num))).collect();
 
-    let mut iter = found.iter().peekable();
-
     // Build tree
     let mut tree = TreeCache::new();
     tree.update_with_elements(&found);
@@ -134,12 +131,10 @@ fn test_walk() {
             AuthOp::Insert(elem)
         })
         .collect();
-    let mut iter = new_found.clone().into_iter().peekable();
+
     // Reuse tree
     tree.update_with_elements(&new_found);
 
-    let v: Vec<Pointer> = tree.walk().iter().map(|elem| elem.pointer).collect();
-    // println!("{:?}", v);
     assert!(tree.walk().len() == EXP);
     tree.walk()
         .iter()
@@ -172,7 +167,7 @@ fn test_delete() {
     // Check all are in
     for (i, key_exists) in found.iter().enumerate() {
         match tree.get(&key_exists.key(), &mut None) {
-            GetPointer::Found(x) => assert!( i % 2 == 0),
+            GetPointer::Found(_x) => assert!( i % 2 == 0),
             GetPointer::NotFound => assert!( i % 2 == 1),
             _ => panic!("Should find / not find the key."),
         }
@@ -220,8 +215,6 @@ fn test_gets() {
     // Reuse tree
     tree.update_with_elements(&found);
 
-    let v: Vec<usize> = tree.walk().iter().map(|i| i.pointer).collect();
-    // println!("{:?}", v);
     assert!(tree.walk().len() == 1000);
 
     for key_exists in &found {
