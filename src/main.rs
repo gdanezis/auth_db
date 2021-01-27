@@ -236,7 +236,7 @@ impl TreeCache {
         pointer: Pointer,
         given_elements: &[AuthElement],
     ) {
-        let mut this_node = &self.cache[&pointer];
+        let this_node = &self.cache[&pointer];
         let intitial_returns = returns.len();
         let intitial_spare_elements = spare_elements.len();
 
@@ -351,7 +351,7 @@ impl TreeCache {
     ) where
         T: Iterator<Item = &'x AuthElement>,
     {
-        let mut this_node = &self.cache[&pointer];
+        let this_node = &self.cache[&pointer];
         let intitial_returns = returns.len();
         let intitial_spare_elements = spare_elements.len();
 
@@ -456,7 +456,7 @@ struct AuthTreeInternalNode {
 impl AuthTreeInternalNode {
     fn empty(
         leaf: bool,
-        mut bounds: [AKey; 2],
+        bounds: [AKey; 2],
     ) -> AuthTreeInternalNode {
         // Initialize memory
         let mut slots = [0; NODE_CAPACITY];
@@ -477,7 +477,7 @@ impl AuthTreeInternalNode {
 
     fn new<'x, T>(
         leaf: bool,
-        mut bounds: [AKey; 2],
+        bounds: [AKey; 2],
         iter: &mut Peekable<T>,
         capacity: usize,
     ) -> AuthTreeInternalNode
@@ -598,7 +598,6 @@ impl AuthTreeInternalNode {
         // Inefficient, but correct to start with:
         let mut position = 0; // The position we are in this block.
         let initial_spare_elements = spare_elements.len();
-        let initial_returns = returns.len();
 
         loop {
             let peek_element = iter.peek();
@@ -722,12 +721,9 @@ impl fmt::Debug for AuthTreeInternalNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut fx = if self.leaf {
             f.debug_struct("Leaf")
-        // .field("V", &self.bounds)
-        // .finish()
+
         } else {
             f.debug_struct("Branch")
-            // .field("V", &self.elements)
-            // .finish()
         };
         let mut x = Vec::new();
         for i in 0..self.elements {
@@ -786,8 +782,6 @@ pub(crate) fn get_test_entry(num: usize) -> AuthElement {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use rand::seq::SliceRandom;
-    use rand::thread_rng;
     use std::time::Instant;
 
     #[test]
