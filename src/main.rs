@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tiny_keccak::{Hasher, Sha3};
 
+use parking_lot::Mutex;
+
 fn main() {
     rayon::ThreadPoolBuilder::new()
         .thread_name(|index| format!("rayon-global-{}", index))
