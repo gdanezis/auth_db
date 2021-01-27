@@ -203,8 +203,6 @@ impl TreeCache {
                 if number_of_returns == 1 {
                     // This is the new root, save and exit.
                     self.root = Some(new_pointer);
-                    // Remove the old root
-                    self.cache.remove(&root_pointer);
 
                     let dur = now.elapsed();
                     println!(
@@ -462,6 +460,10 @@ impl TreeCache {
     }
 
     fn _walk(&self, pointer: Pointer, result: &mut Vec<AuthElement>) {
+        if !self.cache.contains_key(&pointer) {
+            println!("Missing key: {}", pointer);
+        }
+
         let node = &self.cache[&pointer].lock();
         if node.leaf {
             for i in 0..node.elements {
@@ -494,7 +496,6 @@ struct AuthTreeInternalNode {
     leaf: bool,                 // true if this is a leaf node
     elements: usize,            // number of elements in the node
     bounds: [AKey; 2],          // the min and max key (inclusive)
-    slots: [u8; NODE_CAPACITY], // Ordered indexes of elements in node
     items: [AuthElement; NODE_CAPACITY]
 }
 
@@ -504,16 +505,10 @@ impl AuthTreeInternalNode {
         bounds: [AKey; 2],
     ) -> AuthTreeInternalNode {
         // Initialize memory
-        let mut slots = [0; NODE_CAPACITY];
-        for i in 0..NODE_CAPACITY {
-            slots[i] = i as u8;
-        }
-
         let new_node = AuthTreeInternalNode {
             leaf,
             elements: 0,
             bounds,
-            slots: slots,
             items: [Default::default(); NODE_CAPACITY],
         };
 
@@ -621,15 +616,14 @@ impl AuthTreeInternalNode {
     }
 
     fn push_sorted(&mut self, new_element: &AuthElement) {
+        assert!(self.elements < NODE_CAPACITY);
+        self.items[self.elements] = *new_element;
         self.elements += 1;
-        let position = self.slots[self.elements - 1];
-        self.items[position as usize] = *new_element;
     }
 
     fn get_by_position(&self, position: usize) -> &AuthElement {
         assert!(position < self.elements);
-        let inner_position = self.slots[position];
-        &self.items[inner_position as usize]
+        &self.items[position]
     }
 
     fn merge<'x, T>(
