@@ -183,8 +183,15 @@ impl TreeCache {
         let now = Instant::now();
         self.apply_workset(work_set);
         loop {
+
             // Now we reduce the number of returns by constructing the tree
             let number_of_returns = returns.len();
+
+            if number_of_returns == 0 && spare_elements.len() == 0 {
+                // All elements were deleted, and none wait to be in a block.
+                self.root = None;
+                return
+            }
 
             // Save the new nodes in the cache, and add them to the list.
             for mut ret in returns.drain(..) {
@@ -718,6 +725,10 @@ impl AuthTreeInternalNode {
     where
         T: Iterator<Item = &'x AuthElement>,
     {
+        if size == 0 {
+            return
+        }
+
         // Compute the averageoccupancy of a block:
         let mut num_of_blocks = size / NODE_CAPACITY;
         if size % NODE_CAPACITY > 0 {
@@ -996,6 +1007,43 @@ pub(crate) mod tests {
             .for_each(|(elem, base_truth)| {
                 assert!(elem.pointer == 1_000_000 + base_truth.unwrap_insert().pointer);
             });
+    }
+
+    #[test]
+    fn test_delete() {
+        const EXP: usize = 1_000;
+        let found: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Insert(get_test_entry(num))).collect();
+        let delete: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Delete(get_test_entry(2 * num + 1).key)).collect();
+
+        // Build tree
+        let mut tree = TreeCache::new();
+        tree.update_with_elements(&found);
+
+        // Check all are in
+        for key_exists in &found {
+            match tree.get(&key_exists.key()) {
+                GetPointer::Found(x) => assert!(x == key_exists.unwrap_insert().pointer),
+                _ => panic!("Should find the key."),
+            }
+        }
+
+        tree.update_with_elements(&delete);
+
+        // Check all are in
+        for (i, key_exists) in found.iter().enumerate() {
+            match tree.get(&key_exists.key()) {
+                GetPointer::Found(x) => assert!( i % 2 == 0),
+                GetPointer::NotFound => assert!( i % 2 == 1),
+                _ => panic!("Should find / not find the key."),
+            }
+        }
+
+        let delete_all: Vec<AuthOp> = (0..EXP).map(|num| AuthOp::Delete(get_test_entry(num).key)).collect();
+        tree.update_with_elements(&delete_all);
+
+        // All blocks were deleted
+        assert!(tree.cache.len() == 0);
+
     }
 
     #[test]
