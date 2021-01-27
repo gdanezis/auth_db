@@ -2,7 +2,6 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::iter::Iterator;
 use std::iter::Peekable;
-use std::slice;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tiny_keccak::{Hasher, Sha3};
@@ -87,7 +86,6 @@ impl TreeWorkSet {
     }
 }
 
-// #[derive(Debug)]
 struct TreeCache {
     root: Option<usize>,
     cache: HashMap<usize, Box<AuthTreeInternalNode>>,
@@ -162,8 +160,6 @@ impl TreeCache {
         let mut spare_elements = Vec::with_capacity(NODE_CAPACITY);
 
         let mut work_set = TreeWorkSet::new();
-        // let mut iter = update_slice.iter();
-        // self.update(0, &mut work_set, &mut returns, &mut spare_elements, root_pointer, &mut iter.peekable());
         self.update_parallel(
             0,
             &mut work_set,
@@ -184,7 +180,6 @@ impl TreeCache {
         self.apply_workset(work_set);
         loop {
             // Now we reduce the number of returns by constructing the tree
-
             let number_of_returns = returns.len();
 
             // Save the new nodes in the cache, and add them to the list.
