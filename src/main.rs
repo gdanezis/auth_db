@@ -5,7 +5,6 @@ use std::iter::Peekable;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tiny_keccak::{Hasher, Sha3};
-use std::borrow::BorrowMut;
 
 use parking_lot::Mutex;
 
