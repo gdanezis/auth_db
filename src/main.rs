@@ -99,18 +99,38 @@ impl TreeCache {
     fn new() -> TreeCache {
         TreeCache {
             root: None,
-            cache: HashMap::with_capacity(5000),
-            data: HashMap::with_capacity(5000),
+            cache: HashMap::with_capacity(1000),
+            data: HashMap::with_capacity(1000),
             next_pointer: AtomicUsize::new(usize::MAX / 2),
         }
     }
 
-    fn apply_workset(&mut self, workset: TreeWorkSet) {
+    fn clear_updated_pointers(&mut self) -> Vec<Pointer> {
+        let mut updated = Vec::new();
+        for (k, v) in &mut self.cache {
+            v.lock().updated = false;
+        }
+        updated
+    }
+
+
+    fn get_updated_pointers(&mut self) -> Vec<Pointer> {
+        let mut updated = Vec::new();
+        for (k, v) in &mut self.cache {
+            if v.lock().updated {
+                updated.push(*k);
+            }
+        }
+        updated
+    }
+
+    fn apply_workset(&mut self, workset: TreeWorkSet) -> Vec<Pointer> {
         let (cache, remove) = workset.breakup();
-        for elem in remove {
+        for elem in &remove {
             self.cache.remove(&elem);
         }
         self.cache.extend(cache);
+        remove
     }
 
     fn next_pointer(&self) -> Pointer {
@@ -139,7 +159,7 @@ impl TreeCache {
         }
     }
 
-    fn update_with_elements(&mut self, update_slice: &[AuthOp]) {
+    fn update_with_elements(&mut self, update_slice: &[AuthOp]) -> Vec<Pointer> {
         let num_elements = update_slice.len();
 
         let now = Instant::now();
@@ -185,7 +205,7 @@ impl TreeCache {
         println!("Node additions: {} Removals: {}", work_set.cache.len(), work_set.remove.len());
 
         let now = Instant::now();
-        self.apply_workset(work_set);
+        let removed = self.apply_workset(work_set);
         loop {
 
             // Now we reduce the number of returns by constructing the tree
@@ -194,7 +214,7 @@ impl TreeCache {
             if number_of_returns == 0 && spare_elements.len() == 0 {
                 // All elements were deleted, and none wait to be in a block.
                 self.root = None;
-                return
+                return removed;
             }
 
             // Save the new nodes in the cache, and add them to the list.
@@ -220,7 +240,7 @@ impl TreeCache {
                         dur.as_nanos() / num_elements as u128,
                         dur.as_millis()
                     );
-                    return;
+                    return removed;
                 }
             }
 
@@ -405,6 +425,7 @@ impl TreeCache {
 
                 // Update the block in-place:
                 let write_ref : &mut Box<AuthTreeInternalNode> = &mut node_guard;
+                single_block.updated = true;
                 *write_ref = single_block;
             }
             else
@@ -525,6 +546,7 @@ enum GetPointer {
 
 #[derive(Clone)]
 struct AuthTreeInternalNode {
+    updated : bool,
     leaf: bool,                 // true if this is a leaf node
     elements: usize,            // number of elements in the node
     bounds: [AKey; 2],          // the min and max key (inclusive)
@@ -538,6 +560,7 @@ impl AuthTreeInternalNode {
     ) -> AuthTreeInternalNode {
         // Initialize memory
         let new_node = AuthTreeInternalNode {
+            updated : false,
             leaf,
             elements: 0,
             bounds,
@@ -1118,6 +1141,28 @@ pub(crate) mod tests {
             dur.as_millis()
         );
 
+        assert!(tree.get_updated_pointers().len() == 0);
+
+        // Cost of second update
+        let now = Instant::now();
+        // Reuse tree
+        let removed = tree.update_with_elements(&x);
+        let dur = now.elapsed();
+        println!(
+            "Update Tree: Branches {}. {}ns\ttotal: {}ms",
+            tree.cache.len(),
+            dur.as_nanos() / EXP as u128,
+            dur.as_millis()
+        );
+
+        // Check internal book-keeping
+        assert!(tree.get_updated_pointers().len() > 0);
+        tree.clear_updated_pointers();
+        assert!(tree.get_updated_pointers().len() == 0);
+        for r in removed {
+            assert!(!tree.cache.contains_key(&r));
+        }
+
         // Cost of second update
         let now = Instant::now();
         // Reuse tree
@@ -1130,21 +1175,6 @@ pub(crate) mod tests {
             dur.as_millis()
         );
 
-        // println!("{:?}", tree.cache);
-
-        // Cost of second update
-        let now = Instant::now();
-        // Reuse tree
-        tree.update_with_elements(&x);
-        let dur = now.elapsed();
-        println!(
-            "Update Tree: Branches {}. {}ns\ttotal: {}ms",
-            tree.cache.len(),
-            dur.as_nanos() / EXP as u128,
-            dur.as_millis()
-        );
-
-        // println!("TREE({}) {:?}", tree.cache.len(), tree.cache);
-        // assert!(returns.len() == 1 + 100 / (NODE_CAPACITY));
+        assert!(tree.get_updated_pointers().len() > 0);
     }
 }
