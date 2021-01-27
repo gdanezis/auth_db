@@ -5,6 +5,7 @@ use std::iter::Peekable;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tiny_keccak::{Hasher, Sha3};
+use std::borrow::BorrowMut;
 
 use parking_lot::Mutex;
 
@@ -66,7 +67,7 @@ const MIN_KEY: AKey = [0; KEY_SIZE];
 const MAX_KEY: AKey = [255; KEY_SIZE];
 
 struct TreeWorkSet {
-    cache: HashMap<usize, Box<AuthTreeInternalNode>>,
+    cache: HashMap<usize, Mutex<Box<AuthTreeInternalNode>>>,
     remove: Vec<usize>,
 }
 
@@ -78,7 +79,7 @@ impl TreeWorkSet {
         }
     }
 
-    fn breakup(self) -> (HashMap<usize, Box<AuthTreeInternalNode>>, Vec<usize>) {
+    fn breakup(self) -> (HashMap<usize, Mutex<Box<AuthTreeInternalNode>>>, Vec<usize>) {
         (self.cache, self.remove)
     }
 
@@ -90,7 +91,7 @@ impl TreeWorkSet {
 
 struct TreeCache {
     root: Option<usize>,
-    cache: HashMap<usize, Box<AuthTreeInternalNode>>,
+    cache: HashMap<usize, Mutex<Box<AuthTreeInternalNode>>>,
     data: HashMap<usize, AuthTreeEntry>,
     next_pointer: AtomicUsize,
 }
@@ -125,7 +126,7 @@ impl TreeCache {
 
         let mut next_pointer = self.root.unwrap();
         loop {
-            let next_node = &self.cache[&next_pointer];
+            let next_node = &self.cache[&next_pointer].lock();
             match next_node.get(key) {
                 GetPointer::Goto(p) => {
                     next_pointer = p;
@@ -143,7 +144,7 @@ impl TreeCache {
         let root_pointer = if self.root.is_none() {
             let root = Box::new(AuthTreeInternalNode::empty(true, [MIN_KEY, MAX_KEY]));
             let root_pointer = self.next_pointer();
-            self.cache.insert(root_pointer, root);
+            self.cache.insert(root_pointer, Mutex::new(root));
             self.root = Some(root_pointer);
             root_pointer
         } else {
@@ -178,6 +179,8 @@ impl TreeCache {
             dur.as_millis()
         );
 
+        println!("Node additions: {} Removals: {}", work_set.cache.len(), work_set.remove.len());
+
         let now = Instant::now();
         self.apply_workset(work_set);
         loop {
@@ -195,7 +198,7 @@ impl TreeCache {
 
                 ret.compute_hash(&mut new_element.digest);
                 spare_elements.push(new_element);
-                self.cache.insert(new_pointer, ret);
+                self.cache.insert(new_pointer, Mutex::new(ret));
 
                 if number_of_returns == 1 {
                     // This is the new root, save and exit.
@@ -233,13 +236,19 @@ impl TreeCache {
         pointer: Pointer,
         given_elements: &[AuthElement],
     ) {
-        let this_node = &self.cache[&pointer];
+
+        // println!("Wait for lock {}", pointer);
+        let node_guard = self.cache[&pointer].lock();
+        let this_node = &node_guard;
+        // println!("Got lock {}", pointer);
         let intitial_returns = returns.len();
         let intitial_spare_elements = spare_elements.len();
 
         // Does not work for a leaf node -- revert to normal update.
         if this_node.leaf {
             let mut iter = given_elements.iter().peekable();
+            // We must drop the lock to allow update to re-enter.
+            drop(node_guard);
             self.update(
                 depth + 1,
                 work_set,
@@ -254,7 +263,6 @@ impl TreeCache {
         let this_node_len = this_node.elements;
         let positions: Vec<_> = (0..this_node_len).into_iter().collect();
 
-        println!("Parallel: {} ways", positions.len());
         let computed: Vec<_> = positions
             .par_iter()
             .map(|i| {
@@ -328,7 +336,7 @@ impl TreeCache {
 
                     ret.compute_hash(&mut new_element.digest);
                     spare_elements.push(new_element);
-                    work_set.cache.insert(new_pointer, ret);
+                    work_set.cache.insert(new_pointer, Mutex::new(ret));
                 }
 
                 // Now get back the node we were considering
@@ -362,13 +370,39 @@ impl TreeCache {
     ) where
         T: Iterator<Item = &'x AuthElement>,
     {
-        let this_node = &self.cache[&pointer];
+        let mut node_guard = self.cache[&pointer].lock();
+        let this_node = &node_guard;
         let intitial_returns = returns.len();
         let intitial_spare_elements = spare_elements.len();
 
         if this_node.leaf {
+            let returns_initial_length = returns.len();
+            let spare_initial_length = spare_elements.len();
             this_node.merge(returns, spare_elements, iter);
-            work_set.remove.push(pointer);
+            assert!(spare_elements.len() == spare_initial_length);
+
+            // We special case updating leaves, since we have lots of them.
+            // If as a result of the update we only have a single leaf, then
+            // we re-write the given leaf in place. Otherwise we create new
+            // (many) blocks, re-balancing the items.
+            if returns.len() - returns_initial_length == 1 {
+                let mut single_block = returns.pop().unwrap(); // safe due to check
+                let mut updated_element = AuthElement {
+                    key: single_block.bounds[1],
+                    digest: [0; DIGEST_SIZE],
+                    pointer: pointer,
+                };
+                single_block.compute_hash(&mut updated_element.digest);
+                spare_elements.push(updated_element);
+
+                // Update the block in-place:
+                let write_ref : &mut Box<AuthTreeInternalNode> = &mut node_guard;
+                *write_ref = single_block;
+            }
+            else
+            {
+                work_set.remove.push(pointer);
+            }
             return;
         }
 
@@ -408,7 +442,7 @@ impl TreeCache {
 
                 ret.compute_hash(&mut new_element.digest);
                 spare_elements.push(new_element);
-                work_set.cache.insert(new_pointer, ret);
+                work_set.cache.insert(new_pointer, Mutex::new(ret));
             }
         }
 
@@ -428,7 +462,7 @@ impl TreeCache {
     }
 
     fn _walk(&self, pointer: Pointer, result: &mut Vec<AuthElement>) {
-        let node = &self.cache[&pointer];
+        let node = &self.cache[&pointer].lock();
         if node.leaf {
             for i in 0..node.elements {
                 result.push(*node.get_by_position(i));
