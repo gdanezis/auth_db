@@ -138,18 +138,16 @@ impl TreeCache {
         };
 
         // Make some temporary structures.
-        let mut returns = Vec::with_capacity(NODE_CAPACITY);
-        let mut spare_elements = Vec::with_capacity(NODE_CAPACITY);
+        let mut scratch = ScratchPad::new();
 
-        let mut work_set = TreeWorkSet::new();
-        self.update_parallel(
+        self.update_parallel_scratch(
             0,
-            &mut work_set,
-            &mut returns,
-            &mut spare_elements,
+            &mut scratch,
             root_pointer,
             update_slice,
         );
+
+        let (mut work_set, mut returns, mut spare_elements) = scratch.split();
 
         let removed = self.apply_workset(work_set);
         loop {
@@ -212,6 +210,26 @@ impl TreeCache {
             ret.compute_hash(&mut new_element.digest);
             spare_elements.push(new_element);
             work_set.cache.insert(new_pointer, Mutex::new(ret));
+        }
+
+    }
+
+    fn prepare_returns_scratch(&self,
+        intitial_returns : usize,
+        scratch : &mut ScratchPad){
+
+        // Save the new nodes in the cache, and add them to the list.
+        for mut ret in scratch.returns.drain(intitial_returns..) {
+            let new_pointer = self.next_pointer();
+            let mut new_element = AuthElement {
+                key: ret.bounds[1],
+                digest: [0; DIGEST_SIZE],
+                pointer: new_pointer,
+            };
+
+            ret.compute_hash(&mut new_element.digest);
+            scratch.spare_elements.push(new_element);
+            scratch.work_set.cache.insert(new_pointer, Mutex::new(ret));
         }
 
     }
@@ -334,6 +352,113 @@ impl TreeCache {
         work_set.remove.push(pointer);
     }
 
+    fn update_parallel_scratch(
+        &self,
+        depth: usize,
+        scratch : &mut ScratchPad,
+        pointer: Pointer,
+        given_elements: &[AuthOp],
+    ) {
+
+        // println!("Wait for lock {}", pointer);
+        let node_guard = self.cache[&pointer].lock();
+        let this_node = &node_guard;
+        // println!("Got lock {}", pointer);
+        let intitial_returns = scratch.returns.len();
+        let intitial_spare_elements = scratch.spare_elements.len();
+
+        // Does not work for a leaf node -- revert to normal update.
+        if this_node.leaf {
+            drop(node_guard);
+            self.update_leaf_scratch(
+                depth,
+                scratch,
+                pointer,
+                &mut given_elements.iter().peekable()
+            );
+            return
+        }
+
+        let this_node_len = this_node.elements;
+        let positions: Vec<_> = (0..this_node_len).into_iter().collect();
+
+        let computed: Vec<_> = positions
+            .par_iter()
+            .map(|i| {
+                let mut scratch = ScratchPad::new();
+
+                let this_child_ref = this_node.get_by_position(*i);
+
+                // Compute the start position:
+                let start_position = if *i > 0 {
+                    let prev_child_ref = this_node.get_by_position(i - 1);
+                    given_elements[..]
+                        .binary_search_by_key(&prev_child_ref.key, |elem| *elem.key())
+                        .map(|x| x + 1)
+                        .unwrap_or_else(|x| x)
+                } else {
+                    0
+                };
+
+                // Compute the end position:
+                let end_position = given_elements[..]
+                    .binary_search_by_key(&this_child_ref.key, |elem| *elem.key())
+                    .map(|x| x + 1)
+                    .unwrap_or_else(|x| x);
+
+
+                if start_position == end_position {
+                    // We do not need to explore in this child, so we simply add the element to the spares list
+                    scratch.spare_elements.push(*this_child_ref); // FIX (perf): COPY HERE
+                    return scratch;
+                }
+
+                if depth == 0 && this_node_len < NODE_CAPACITY / 2 {
+                    // Allow for one more level of parallelism, in case the root is very small.
+                    self.update_parallel_scratch(
+                        depth + 1,
+                        &mut scratch,
+                        this_child_ref.pointer,
+                        &given_elements[start_position..end_position],
+                    );
+                }
+                else {
+                    let mut iter = given_elements[start_position..end_position]
+                        .iter()
+                        .peekable();
+                    self.update_scratch(
+                        depth + 1,
+                        &mut scratch,
+                        this_child_ref.pointer,
+                        &mut iter,
+                    );
+                }
+
+                self.prepare_returns_scratch(
+                    intitial_returns,
+                    &mut scratch);
+
+                // Now get back the node we were considering
+                return scratch;
+            })
+            .collect();
+
+        for mut inner_scratch in computed.into_iter() {
+            let (ws, ret, spare) = inner_scratch.split();
+            scratch.returns.extend(ret);
+            scratch.spare_elements.extend(spare);
+            scratch.work_set.extend(ws);
+        }
+
+        this_node.split_update(
+            &mut scratch.returns,
+            scratch.spare_elements.len() - intitial_spare_elements,
+            &mut scratch.spare_elements[intitial_spare_elements..].iter().peekable(),
+        );
+        scratch.spare_elements.truncate(intitial_spare_elements);
+        scratch.work_set.remove.push(pointer);
+    }
+
     pub fn update_leaf<'x, T>(
         &self,
         depth: usize,
@@ -374,6 +499,48 @@ impl TreeCache {
         else
         {
             work_set.remove.push(pointer);
+        }
+        return;
+    }
+
+    fn update_leaf_scratch<'x, T>(
+        &self,
+        depth: usize,
+        scratch : &mut ScratchPad,
+        pointer: Pointer,
+        iter: &mut Peekable<T>,
+    ) where
+        T: Iterator<Item = &'x AuthOp>,
+    {
+        let mut node_guard = self.cache[&pointer].lock();
+        let this_node = &node_guard;
+        let returns_initial_length = scratch.returns.len();
+        let spare_initial_length = scratch.spare_elements.len();
+        this_node.merge_into_leaf(&mut scratch.returns, &mut scratch.spare_elements, iter);
+        assert!(scratch.spare_elements.len() == spare_initial_length);
+
+        // We special case updating leaves, since we have lots of them.
+        // If as a result of the update we only have a single leaf, then
+        // we re-write the given leaf in place. Otherwise we create new
+        // (many) blocks, re-balancing the items.
+        if scratch.returns.len() - returns_initial_length == 1 {
+            let mut single_block = scratch.returns.pop().unwrap(); // safe due to check
+            let mut updated_element = AuthElement {
+                key: single_block.bounds[1],
+                digest: [0; DIGEST_SIZE],
+                pointer: pointer,
+            };
+            single_block.compute_hash(&mut updated_element.digest);
+            scratch.spare_elements.push(updated_element);
+
+            // Update the block in-place:
+            let write_ref : &mut Box<AuthTreeInternalNode> = &mut node_guard;
+            single_block.updated = true;
+            *write_ref = single_block;
+        }
+        else
+        {
+            scratch.work_set.remove.push(pointer);
         }
         return;
     }
@@ -447,6 +614,69 @@ impl TreeCache {
         );
         spare_elements.truncate(intitial_spare_elements);
         work_set.remove.push(pointer);
+    }
+
+    fn update_scratch<'x, T>(
+        &self,
+        depth: usize,
+        scratch : &mut ScratchPad,
+        pointer: Pointer,
+        iter: &mut Peekable<T>,
+    ) where
+        T: Iterator<Item = &'x AuthOp>,
+    {
+        let node_guard = self.cache[&pointer].lock();
+        let this_node = &node_guard;
+        let intitial_returns = scratch.returns.len();
+        let intitial_spare_elements = scratch.spare_elements.len();
+
+        if this_node.leaf {
+            // Drop the mutex to allow to re-enter
+            drop(node_guard);
+            self.update_leaf_scratch(
+                depth,
+                scratch,
+                pointer,
+                iter
+            );
+            return
+        }
+
+        // This is an internal node
+        let this_node_len = this_node.elements;
+        for i in 0..this_node_len {
+            let this_child_ref = this_node.get_by_position(i);
+
+            let peek_next = iter.peek();
+
+            if peek_next.is_none() || !(peek_next.unwrap().key() <= &this_child_ref.key) {
+                // We do not need to explore in this child, so we simply add the element to the spares list
+                scratch.spare_elements.push(*this_child_ref); // FIX (perf): COPY HERE
+                continue;
+            }
+
+            // We need to explore down this child
+            let child_pointer = this_child_ref.pointer;
+
+            self.update_scratch(
+                depth + 1,
+                scratch,
+                child_pointer,
+                iter,
+            );
+
+            self.prepare_returns_scratch(
+                intitial_returns,
+                scratch);
+        }
+
+        this_node.split_update(
+            &mut scratch.returns,
+            scratch.spare_elements.len() - intitial_spare_elements,
+            &mut scratch.spare_elements[intitial_spare_elements..].iter().peekable(),
+        );
+        scratch.spare_elements.truncate(intitial_spare_elements);
+        scratch.work_set.remove.push(pointer);
     }
 
     pub fn walk(&self) -> Vec<AuthElement> {
