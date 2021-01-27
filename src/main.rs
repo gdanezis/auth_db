@@ -386,7 +386,7 @@ impl TreeCache {
         if this_node.leaf {
             let returns_initial_length = returns.len();
             let spare_initial_length = spare_elements.len();
-            this_node.merge(returns, spare_elements, iter);
+            this_node.merge_into_leaf(returns, spare_elements, iter);
             assert!(spare_elements.len() == spare_initial_length);
 
             // We special case updating leaves, since we have lots of them.
@@ -658,7 +658,7 @@ impl AuthTreeInternalNode {
         &self.items[position]
     }
 
-    fn merge<'x, T>(
+    fn merge_into_leaf<'x, T>(
         &self,
         returns: &mut Vec<Box<Self>>,
         spare_elements: &mut Vec<AuthElement>,
@@ -692,7 +692,6 @@ impl AuthTreeInternalNode {
             }
 
             // If we are here, we are going to need the next iterator element.
-            drop(peek_element);
             let new_element = iter.next().unwrap();
 
             if (self_list_finished && !iter_finished)
@@ -946,7 +945,7 @@ pub(crate) mod tests {
         let mut returns = Vec::new();
         let mut spares = Vec::new();
         // println!("START {:?}", entry);
-        entry.merge(&mut returns, &mut spares, &mut iter);
+        entry.merge_into_leaf(&mut returns, &mut spares, &mut iter);
 
         // println!("RET({}) {:?}", returns.len(), returns);
         assert!(returns.len() > 0);
@@ -964,7 +963,7 @@ pub(crate) mod tests {
         let mut returns = Vec::new();
         let mut spares = Vec::new();
         // println!("START {:?}", entry);
-        entry.merge(&mut returns, &mut spares, &mut iter);
+        entry.merge_into_leaf(&mut returns, &mut spares, &mut iter);
 
         // println!("RET({}) {:?}", returns.len(), returns);
         assert!(returns.len() > 0);
